@@ -139,11 +139,11 @@ export function keypairOf(publicKey: string): Keypair {
   return Keypair.fromSecretKey(bs58.decode(w.privateKey))
 }
 
-/** The secret keys of wallets, for the Key button and Export keys. Only wallets with a file; archived ones excluded. */
+/** The secret keys of wallets, for the Key button and Export keys. Only wallets with a file (archived ones too). */
 export function exportKeys(publicKeys: string[]): Array<{ publicKey: string; privateKey: string; label: string; file: string }> {
   const out: Array<{ publicKey: string; privateKey: string; label: string; file: string }> = []
   for (const pk of publicKeys) {
-    const file = findFile(pk)
+    const file = findFile(pk) ?? findFile(pk, ARCHIVE_DIR)
     const w = file ? readFile(file) : null
     if (!w || !file) throw new NotBackedUpError(pk)
     out.push({ publicKey: w.publicKey, privateKey: w.privateKey, label: w.label, file: path.basename(file) })
@@ -291,12 +291,12 @@ export function updateWallet(publicKey: string, patch: { label?: string; role?: 
  * Archive wallets: their files move to archived/ (keys kept, never used again). The ★ wallet cannot be archived; a
  * wallet without a file is skipped. Returns what moved.
  */
-export function archiveWallets(publicKeys: string[]): { archived: string[]; dir: string } {
+export function archiveWallets(publicKeys: string[], allowMain = false): { archived: string[]; dir: string } {
   const main = mainWallet()
   fs.mkdirSync(ARCHIVE_DIR, { recursive: true })
   const archived: string[] = []
   for (const pk of publicKeys) {
-    if (main && pk === main.publicKey) throw new Error("The ★ wallet cannot be archived; star another wallet first")
+    if (main && pk === main.publicKey && !allowMain) throw new Error("The main wallet cannot be removed; make another wallet the main wallet first")
     const file = findFile(pk)
     if (!file) continue
     fs.renameSync(file, path.join(ARCHIVE_DIR, path.basename(file)))
@@ -304,6 +304,18 @@ export function archiveWallets(publicKeys: string[]): { archived: string[]; dir:
     console.log(`[wallets] archived ${pk.slice(0, 8)}… → ${ARCHIVE_DIR}`)
   }
   return { archived, dir: ARCHIVE_DIR }
+}
+
+/** Bring archived wallets back: their files move from archived/ to the folder again. Returns the ones restored. */
+export function unarchiveWallets(publicKeys: string[]): { restored: string[] } {
+  const restored: string[] = []
+  for (const pk of publicKeys) {
+    const file = findFile(pk, ARCHIVE_DIR)
+    if (!file) continue
+    fs.renameSync(file, path.join(BACKUP_DIR, path.basename(file)))
+    restored.push(pk)
+  }
+  return { restored }
 }
 
 /**
@@ -336,6 +348,7 @@ export const walletStore: WalletStore = {
   main: mainWallet,
   assertBackedUp,
   keypairOf,
-  create: (count, role = "trader", label) => createWallets(count, role, label),
+  // the launch code asks for exactly what is missing: 0 means none (the HTTP route keeps its "at least 1")
+  create: (count, role = "trader", label) => (count >= 1 ? createWallets(count, role, label) : []),
   backupNote: (w) => `has its file (${w.file})`,
 }

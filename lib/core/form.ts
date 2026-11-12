@@ -44,6 +44,7 @@ export function readForm(b: Record<string, unknown>, defaultSlippage: number): L
     creatorFeeBps: Math.max(0, Math.min(10_000, Math.round(num(b.creatorFeeBps, 0)))),
     holderReward: b.holderReward === true,
     devWallet: s(b.devWallet) || undefined,
+    devFresh: b.devFresh === true,
     devBuySol: Math.max(0, num(b.devBuySol, 0)),
     bundle: { count: count(bundle.count, 16), solEach: Math.max(0, num(bundle.solEach, 0)), wallets: buyers(bundle.wallets, 16) },
     snipers: { count: count(snipers.count, 50), solEach: Math.max(0, num(snipers.solEach, 0)), wallets: buyers(snipers.wallets, 50), gapMs: Math.max(0, num(snipers.gapMs, 400)) },
@@ -51,5 +52,38 @@ export function readForm(b: Record<string, unknown>, defaultSlippage: number): L
     fundFirst: b.fundFirst === true,
     useJito: b.useJito !== false,
     slippage: Math.max(1, Math.min(50, num(b.slippage, defaultSlippage))),
+    speed: b.speed === "fast" || b.speed === "turbo" ? b.speed : "normal",
+    bundleGap: { fromMs: Math.max(0, Math.min(30_000, num(o(b.bundleGap).fromMs, 0))), toMs: Math.max(0, Math.min(30_000, num(o(b.bundleGap).toMs, 0))) },
+    bundleMaxOutside: Math.max(0, num(b.bundleMaxOutside, 0)),
+    autoSell: b.autoSell && typeof b.autoSell === "object" ? autoSellOf(o(b.autoSell)) : undefined,
+    claim: b.claim && typeof b.claim === "object" ? { when: o(b.claim).when === "after" ? "after" : "sold", afterMin: Math.max(1, Math.min(24 * 60, num(o(b.claim).afterMin, 30))) } : undefined,
+    volume: b.volume && typeof b.volume === "object" ? volumeOf(o(b.volume)) : undefined,
+  }
+}
+
+/** The volume maker with bounds: 1–20 wallets, a budget, a pace, 1 min to 2 h. */
+function volumeOf(v: Record<string, unknown>): LaunchForm["volume"] {
+  const wallets = strings(v.wallets).filter((pk) => pk.length >= 32).slice(0, 20)
+  return {
+    count: Math.max(wallets.length, Math.min(20, Math.max(0, Math.floor(num(v.count, wallets.length))))),
+    wallets,
+    budget: Math.max(0, Math.min(100, num(v.budget, 0))),
+    pace: v.pace === "light" || v.pace === "heavy" ? v.pace : "normal",
+    minutes: Math.max(1, Math.min(120, num(v.minutes, 10))),
+    size: v.size === "calm" || v.size === "wild" ? v.size : "normal",
+  }
+}
+
+/** The auto-sell rule with bounds; both triggers 0 = off. */
+function autoSellOf(a: Record<string, unknown>): LaunchForm["autoSell"] {
+  return {
+    netIn: Math.max(0, Math.min(1000, num(a.netIn, 0))),
+    afterMin: Math.max(0, Math.min(24 * 60, num(a.afterMin, 0))),
+    bundle: a.bundle === "spread" ? "spread" : "all",
+    spreadSec: Math.max(1, Math.min(600, num(a.spreadSec, 20))),
+    main: a.main === "later" ? "later" : a.main === "own" ? "own" : a.main === "keep" ? "keep" : "with",
+    mainLaterSec: Math.max(1, Math.min(3600, num(a.mainLaterSec, 30))),
+    mainNetIn: Math.max(0, Math.min(1000, num(a.mainNetIn, 0))),
+    mainAfterMin: Math.max(0, Math.min(24 * 60, num(a.mainAfterMin, 0))),
   }
 }

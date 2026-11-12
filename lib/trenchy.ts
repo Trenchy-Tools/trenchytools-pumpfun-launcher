@@ -11,15 +11,8 @@
  * Copy this file into your own project. It depends only on @solana/web3.js and bs58. Docs for every endpoint:
  * https://api.trenchy.tools/AGENTS.md and https://trenchy.tools/openapi.json
  */
-import {
-  Keypair,
-  LAMPORTS_PER_SOL,
-  PublicKey,
-  SystemProgram,
-  TransactionMessage,
-  VersionedTransaction,
-  type TransactionInstruction,
-} from "@solana/web3.js"
+// web3.js only signs and (de)serializes here: every transaction is built by the API
+import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, VersionedTransaction } from "@solana/web3.js"
 import bs58 from "bs58"
 import { Buffer } from "buffer"
 import { ApiError } from "./core/errors"
@@ -95,6 +88,9 @@ export type TokenInfo = {
   holderReward: boolean; creatorFeeBps: number; depth: number; cashback?: boolean
   curve: { complete: boolean; creator: string; bondingProgressPct: number; mayhem: boolean; marketCapQuote: number; priceQuote: number; marketCapSol: number | null; priceSol: number | null } | null
 }
+/** POST /api/ai/coin: an AI-made coin; `image` is a data URL (png / jpeg / webp) to upload like a picked file */
+export type AiCoin = { name: string; symbol: string; description: string; image: string; via?: { writer?: string; drawer?: string }; left?: { hour?: number; day?: number } }
+export type TxStatus = { signature: string; confirmationStatus: string | null; slot?: number; err?: unknown }
 export type WalletBalance = { wallet: string; sol: number; token?: { mint: string; balance: number; raw: string; account: string | null; program: string | null } }
 export type TokenAccount = { mint: string; balance: number; raw: string; account: string; program: string }
 export type Simulation = { ok: boolean; err: unknown; unitsConsumed: number | null; logs: string[] }
@@ -178,7 +174,7 @@ export class Trenchy {
     for (let attempt = 0; ; attempt++) {
       let res: Response
       try {
-        res = await fetch(`${this.url}${path}`, { ...init, headers, signal: AbortSignal.timeout(45_000) })
+        res = await fetch(`${this.url}${path}`, { ...init, headers, signal: AbortSignal.timeout((init as { timeoutMs?: number }).timeoutMs ?? 45_000) })
       } catch (e) {
         if (attempt < 2) { await sleep(500 * (attempt + 1)); continue }
         throw new ApiError(`TrenchyTools API unreachable at ${this.url} (${e instanceof Error ? e.message : e})`, 0, "unreachable")
@@ -240,7 +236,15 @@ export class Trenchy {
   }
 
   /** GET /api/sol/blockhash: for the plain SOL transfers and account closes this app builds itself. */
-  blockhash() { return this.get<{ blockhash: string; lastValidBlockHeight: number }>("/api/sol/blockhash") }
+  /** GET /api/sol/blockhash, cached for 2 s: parallel sends and expiry checks share one read. */
+  blockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
+    if (this.bh && Date.now() - this.bh.at < 2000) return this.bh.p
+    const p = this.get<{ blockhash: string; lastValidBlockHeight: number }>("/api/sol/blockhash")
+    this.bh = { at: Date.now(), p }
+    p.catch(() => { this.bh = null })
+    return p
+  }
+  private bh: { at: number; p: Promise<{ blockhash: string; lastValidBlockHeight: number }> } | null = null
 
   // ── sending ─────────────────────────────────────────────────────────────
 
@@ -257,7 +261,46 @@ export class Trenchy {
   /** GET /api/sol/bundle/:id: pending | landed | failed | invalid. */
   bundleStatus(id: string) { return this.get<{ bundleId: string; status: string; landedSlot?: number | null }>(`/api/sol/bundle/${encodeURIComponent(id)}`) }
   /** GET /api/sol/tx/:signature: confirmation status and error, if any. */
-  txStatus(sig: string) { return this.get<{ signature: string; confirmationStatus: string | null; err?: unknown }>(`/api/sol/tx/${encodeURIComponent(sig)}`) }
+  /**
+   * The status of one transaction. Calls made within ~150 ms of each other are asked together in ONE request
+   * (GET /api/sol/txs, up to 100 signatures), so a launch or a sell-all waiting on 20 transactions costs one request a
+   * second, not 20 (the API allows 300 a minute per key). An API without /txs gets the one-by-one route instead.
+   */
+  txStatus(sig: string): Promise<TxStatus> {
+    return new Promise((resolve, reject) => {
+      const list = this.statusWaiters.get(sig) ?? []
+      list.push({ resolve, reject })
+      this.statusWaiters.set(sig, list)
+      if (!this.statusTimer) this.statusTimer = setTimeout(() => void this.flushStatuses(), 150)
+    })
+  }
+  private statusWaiters = new Map<string, Array<{ resolve: (s: TxStatus) => void; reject: (e: unknown) => void }>>()
+  private statusTimer: ReturnType<typeof setTimeout> | null = null
+  private batchStatuses = true
+  private async flushStatuses() {
+    this.statusTimer = null
+    const waiting = new Map(this.statusWaiters)
+    this.statusWaiters.clear()
+    const sigs = [...waiting.keys()]
+    const settle = (sig: string, f: (w: { resolve: (s: TxStatus) => void; reject: (e: unknown) => void }) => void) => (waiting.get(sig) ?? []).forEach(f)
+    for (let i = 0; i < sigs.length; i += 100) {
+      const chunk = sigs.slice(i, i + 100)
+      if (this.batchStatuses) {
+        try {
+          const r = await this.get<{ statuses: TxStatus[] }>(`/api/sol/txs?signatures=${chunk.join(",")}`)
+          const by = new Map(r.statuses.map((x) => [x.signature, x]))
+          for (const sig of chunk) settle(sig, (w) => w.resolve(by.get(sig) ?? { signature: sig, confirmationStatus: null }))
+          continue
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 404)) { for (const sig of chunk) settle(sig, (w) => w.reject(e)); continue }
+          this.batchStatuses = false // an older API: one by one from now on
+        }
+      }
+      await Promise.all(chunk.map(async (sig) => {
+        try { const st = await this.get<TxStatus>(`/api/sol/tx/${encodeURIComponent(sig)}`); settle(sig, (w) => w.resolve(st)) } catch (e) { settle(sig, (w) => w.reject(e)) }
+      }))
+    }
+  }
 
   /** Poll GET /api/sol/tx/:signature until confirmed (true), failed (throws) or timed out (false). */
   async waitConfirmed(sig: string, timeoutMs = 60_000, onProgress?: (msg: string) => void): Promise<boolean> {
@@ -294,30 +337,31 @@ export class Trenchy {
   }
 
   /**
-   * Build and sign a plain transaction ONCE (GET /api/sol/blockhash), then re-send those same signed bytes
-   * (POST /api/sol/send) until it confirms or its blockhash dies. Re-sending identical bytes is safe: the chain
-   * dedupes by signature, so a transfer that landed but timed out is never paid twice. Only when GET /api/sol/tx
-   * still shows nothing after the blockhash can no longer land is it rebuilt with a fresh blockhash.
+   * Sign a transaction the API built and send it until it confirms. The same signed bytes are re-sent (POST /api/sol/send)
+   * while they can still land: the chain dedupes by signature, so a transfer that landed but timed out is never paid
+   * twice. Only when GET /api/sol/tx still shows nothing after its blockhash can no longer land is `build` called again
+   * for a fresh transaction (at most `rebuilds` times). Nothing is built here: the API builds, this app signs.
    */
-  async sendInstructions(payer: Keypair, ixs: TransactionInstruction[], extraSigners: Keypair[] = [], confirm = true, rebuilds = 0): Promise<string> {
+  async sendBuilt(build: () => Promise<VersionedTransaction>, signers: Keypair[], confirm = true, rebuilds = 0): Promise<string> {
     let lastSignature = ""
-    for (let build = 0; build <= rebuilds; build++) {
-      const { blockhash, lastValidBlockHeight } = await this.blockhash()
-      const tx = new VersionedTransaction(new TransactionMessage({ payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs }).compileToV0Message())
-      tx.sign([payer, ...extraSigners])
+    for (let attempt = 0; attempt <= rebuilds; attempt++) {
+      const tx = await build()
+      // the API's blockhash is at most a few seconds old: a fresh one's last valid height bounds it from above (safe side)
+      const { lastValidBlockHeight } = await this.blockhash()
+      tx.sign(signers)
       const signature = bs58.encode(tx.signatures[0])
       lastSignature = signature
 
       // First send simulated (skipPreflight false): a transfer from an empty wallet fails here with the reason.
       let sent = false
-      for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+      for (let i = 0; i < 3 && !sent; i++) {
         try {
-          await this.send(tx, { skipPreflight: attempt > 0 })
+          await this.send(tx, { skipPreflight: i > 0 })
           sent = true
         } catch (e) {
           if (e instanceof ApiError && e.code === "simulation_failed") throw e
-          if (attempt === 2 && !confirm) throw e
-          await sleep((attempt + 1) * 800)
+          if (i === 2 && !confirm) throw e
+          await sleep((i + 1) * 800)
         }
       }
       if (!confirm) return signature
@@ -351,11 +395,28 @@ export class Trenchy {
     throw new Error(`Transaction ${lastSignature.slice(0, 12)}… expired before it reached the chain`)
   }
 
-  /** SOL from one wallet to another, confirmed (same signed bytes re-sent; rebuilt only once they can no longer land). */
+  /**
+   * SOL from one wallet to another, confirmed: POST /api/transfer (route "direct") builds the transfer, this app signs
+   * and sends it, then POST /api/transfer/:id/sent records the signature.
+   */
   async transferSol(from: Keypair, to: PublicKey, solAmount: number, opts: { lamports?: number; confirm?: boolean } = {}): Promise<string> {
     const lamports = opts.lamports ?? Math.round(solAmount * LAMPORTS_PER_SOL)
+    let transferId = ""
+    const build = async () => {
+      const r = await this.post<{ transferId: string; transaction?: { transaction?: string } }>("/api/transfer", {
+        route: "direct", from: { chain: "sol", wallet: from.publicKey.toBase58() }, to: { chain: "sol", address: to.toBase58() }, amount: lamports / LAMPORTS_PER_SOL,
+      })
+      if (!r.transaction?.transaction) throw new Error("The API returned no transfer transaction")
+      transferId = r.transferId
+      const tx = VersionedTransaction.deserialize(Buffer.from(r.transaction.transaction, "base64"))
+      // signed only if it is exactly this transfer: one SOL transfer, from this wallet, to that address, this amount
+      Trenchy.checkDeposit(tx, from.publicKey, to.toBase58(), lamports)
+      return tx
+    }
     try {
-      return await this.sendInstructions(from, [SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports })], [], opts.confirm ?? true, 2)
+      const signature = await this.sendBuilt(build, [from], opts.confirm ?? true, 2)
+      if (transferId) void this.post(`/api/transfer/${encodeURIComponent(transferId)}/sent`, { hash: signature }).catch(() => {})
+      return signature
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e)
       if (/AccountNotFound|insufficient (funds|lamports)|InsufficientFunds/i.test(why)) {
@@ -363,6 +424,14 @@ export class Trenchy {
       }
       throw new Error(`Transfer of ${(lamports / LAMPORTS_PER_SOL).toFixed(6)} SOL failed: ${why}`)
     }
+  }
+
+  /**
+   * POST /api/sol/close-accounts: transactions that close the owner's EMPTY token accounts, rent to `destination`,
+   * the network fee paid by `payer` (an emptied wallet has no SOL). Sign each with the payer and the owner.
+   */
+  closeAccounts(p: { owner: string; destination?: string; payer?: string; accounts?: string[] }) {
+    return this.post<{ transactions: string[]; accounts: Array<{ address: string; mint: string; rentSol: number }>; rentSol: number }>("/api/sol/close-accounts", p)
   }
 
   // ── reading ─────────────────────────────────────────────────────────────
@@ -387,6 +456,15 @@ export class Trenchy {
   }
   /** GET /api/sol/creator-fees?wallet=…: unclaimed pump.fun creator fees of a dev wallet. */
   creatorFees(wallet: string) { return this.get<{ wallet: string; lamports: string; sol: number }>(`/api/sol/creator-fees?wallet=${wallet}`) }
+
+  /** GET /api/sol/pnl: each wallet's exact SOL change in every transaction that touched the coin (≤ 25 wallets per call). */
+  /** GET /api/sol/quote: what a buy or sell would get right now (curve / pool math, pump.fun's fees included; our fee not). */
+  quote(mint: string, action: "buy" | "sell", amount: number, denominatedInQuote: boolean) {
+    return this.get<{ solOut?: number; solIn?: number; quoteOut?: number; tokensOut?: number }>(`/api/sol/quote?mint=${encodeURIComponent(mint)}&action=${action}&amount=${amount}&denominatedInQuote=${denominatedInQuote}`)
+  }
+  pnl(mint: string, wallets: string[], since?: number) {
+    return this.get<{ mint: string; spent: number; received: number; net: number; trades: number; truncated: boolean; wallets: Array<{ wallet: string; spent: number; received: number; net: number; tokensBought: number; tokensSold: number; truncated: boolean }> }>(`/api/sol/pnl?mint=${mint}&wallets=${wallets.join(",")}${since ? `&since=${since}` : ""}`)
+  }
 
   /** GET /api/sol/token/:mint: venue, quote asset, Mayhem / holder-reward / creator-fee flags, curve state. */
   token(mint: string) { return this.get<TokenInfo>(`/api/sol/token/${encodeURIComponent(mint)}`) }
@@ -450,6 +528,21 @@ export class Trenchy {
     return VersionedTransaction.deserialize(Buffer.from(leg.transaction.transaction, "base64"))
   }
 
+  /** A close-accounts transaction the API built may only close token accounts (CloseAccount = 9 of the two token programs) owned by `owner`, rent to `destination`, fee paid by `payer`. */
+  static checkClose(tx: VersionedTransaction, payer: PublicKey, owner: PublicKey, destination: PublicKey): void {
+    const TOKEN = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]
+    const msg = tx.message
+    const keys = msg.staticAccountKeys
+    if (msg.addressTableLookups.length) throw new Error("close transaction uses a lookup table; refusing to sign")
+    if (!keys[0]?.equals(payer)) throw new Error("close transaction is not paid by the expected wallet")
+    for (const ix of msg.compiledInstructions) {
+      if (!TOKEN.includes(keys[ix.programIdIndex]?.toBase58() ?? "")) throw new Error("close transaction calls a program other than the token programs")
+      if (ix.data.length !== 1 || ix.data[0] !== 9) throw new Error("close transaction holds an instruction other than CloseAccount")
+      if (!keys[ix.accountKeyIndexes[1]]?.equals(destination)) throw new Error("close transaction sends the rent somewhere else")
+      if (!keys[ix.accountKeyIndexes[2]]?.equals(owner)) throw new Error("close transaction closes accounts of another owner")
+    }
+  }
+
   /** The deposit transaction the API built must be exactly one SOL transfer, from our wallet, to the deposit address, for the agreed amount. */
   static checkDeposit(tx: VersionedTransaction, payer: PublicKey, depositAddress: string, expectedLamports: number): void {
     const msg = tx.message
@@ -467,6 +560,14 @@ export class Trenchy {
   }
 
   // ── metadata ────────────────────────────────────────────────────────────
+
+  /**
+   * POST /api/ai/coin: the API writes a coin (name, symbol, description) and draws its logo, from your idea or none
+   * ("surprise me"). Rate limited per key and per IP (`left` says how many tries remain). Drawing can take a minute.
+   */
+  aiCoin(p: { idea?: string; style?: "meme" | "mascot" | "clean" }) {
+    return this.call<AiCoin>("/api/ai/coin", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(p), timeoutMs: 120_000 } as RequestInit)
+  }
 
   /** POST /api/ipfs (multipart): pin the image + metadata, get the `metadataUri` for the create. Pass the browser's FormData straight through. */
   async uploadMetadata(form: FormData): Promise<{ metadataUri: string; metadata?: Record<string, unknown> }> {

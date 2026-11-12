@@ -16,5 +16,7 @@ This app is a starter for the TrenchyTools API (Solana). Before changing it:
 1. Read https://api.trenchy.tools/AGENTS.md (the API's rules) and https://api.trenchy.tools/openapi.json (every endpoint). Use only endpoints that exist there.
 2. Every API call goes through `lib/trenchy.ts`. Add new calls there, one documented method per endpoint.
 3. Wallet backup rule: a wallet is written to its JSON file in the wallet folder BEFORE it is used or funded, and nothing funds a wallet whose file is missing (`assertBackedUp`). Never weaken this.
-4. Signing happens in this app: the API returns unsigned transactions, this app signs and sends them.
+4. Every transaction is built by the API (trade-local, transfer, close-accounts, …): this app checks what it got (`Trenchy.checkDeposit`, `checkClose`), signs it and sends it. Never build a transaction in the app; if the API lacks one, add the endpoint there.
 5. Show API errors as returned (message, code, hint, docs). Never print secrets, keys or the API key.
+6. Pages and components never say "SOL", "pump.fun" or "Jito": they read `lib/chain.ts` (`chain.symbol`, `chain.launchpad`, `chain.features.*`). Porting to another chain (EVM included) is described in `PORTING.md`.
+7. The suite bar, the UI kit (components/ui/*), the AI coin dialog and the logo set are shared with the other TrenchyTools demos. In the TrenchyTools monorepo they live in demos/_shared: edit them in one demo, then run `node demos/_shared/sync.mjs pull <demo>` and `push` so every demo gets the change (see demos/_shared/README.md). Chain-specific code stays in each demo.

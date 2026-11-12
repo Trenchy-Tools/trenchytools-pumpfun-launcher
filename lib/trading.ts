@@ -20,6 +20,7 @@ export const buy = (publicKey: string, mint: string, amount: number, slippage?: 
 export const sellAll = (publicKeys: string[], mint: string, percent: number): Promise<SellAllResult> => core.sellAll(serverEnv(), publicKeys, mint, percent)
 export const creatorOf = (mint: string) => core.creatorOf(serverEnv(), mint)
 export const creatorFees = (mint: string) => core.creatorFees(serverEnv(), mint)
+export const pnl = (mint: string) => core.pnl(serverEnv(), mint)
 export const collectCreatorFees = (mint: string) => core.collectCreatorFees(serverEnv(), mint)
 
 // ── live trades: one websocket to wss://…/api/sol/data, subscribeTokenTrade per coin ─────────────────────────────

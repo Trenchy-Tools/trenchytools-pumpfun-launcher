@@ -105,3 +105,50 @@
     background: color-mix(in oklab, var(--foreground) 18%, transparent);
   }
 }
+
+/* Attention, gently (components/ui/motion.tsx): a number shakes when it changes; a line shakes in when it appears and
+   fades out when it goes. Off for people who ask their system for less motion. */
+@keyframes tt-nudge {
+  0% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1px); }
+  80% { transform: translateX(1px); }
+  100% { transform: translateX(0); }
+}
+@keyframes tt-in {
+  0% { opacity: 0; transform: translateX(-6px); }
+  45% { opacity: 1; transform: translateX(3px); }
+  65% { transform: translateX(-2px); }
+  85% { transform: translateX(1px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+@keyframes tt-out {
+  0% { opacity: 1; max-height: 4em; }
+  100% { opacity: 0; max-height: 0; transform: translateX(8px); margin-top: 0; margin-bottom: 0; }
+}
+/* the "?" of an option that was just switched on */
+@keyframes tt-wiggle {
+  0% { transform: rotate(0) scale(1); box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 60%, transparent); }
+  100% { transform: rotate(0) scale(1); box-shadow: 0 0 0 10px transparent; }
+  10% { transform: rotate(-18deg) scale(1.35); }
+  20% { transform: rotate(16deg) scale(1.35); }
+  30% { transform: rotate(-14deg) scale(1.3); }
+  40% { transform: rotate(12deg) scale(1.25); }
+  50% { transform: rotate(-8deg) scale(1.2); }
+  60% { transform: rotate(6deg) scale(1.15); }
+  70% { transform: rotate(-3deg) scale(1.1); }
+}
+/* a line that just changed: a green wash that fades */
+@keyframes tt-flash {
+  0% { background-color: color-mix(in oklab, var(--ok) 30%, transparent); color: var(--ok); }
+  100% { background-color: transparent; }
+}
+.tt-flash { border-radius: 4px; animation: tt-flash 1.4s ease-out; }
+.tt-wiggle { animation: tt-wiggle 0.9s ease-in-out; }
+.tt-nudge { display: inline-block; animation: tt-nudge 0.35s ease-out; }
+.tt-in { animation: tt-in 0.45s ease-out both; }
+.tt-out { overflow: hidden; animation: tt-out 0.3s ease-in forwards; }
+@media (prefers-reduced-motion: reduce) {
+  .tt-nudge, .tt-in, .tt-out, .tt-wiggle, .tt-flash { animation: none; }
+}

@@ -81,6 +81,8 @@ function createWallets(count: number, role: Role = "trader", label?: string) {
     const { wallet } = ks.add({ ...k, chain: CHAIN, role, label: newLabel(label, n, i, start), createdAt: stampAt(i), app: APP_NAME })
     out.push({ ...info(wallet), path: KEYS_HOME })
   }
+  // a trace for the developer console: which code made these wallets (the caller's frames), never a key
+  console.info(`[wallets] created ${n} · role ${role} · ${out.map((w) => `${w.label} ${w.publicKey.slice(0, 4)}…`).join(", ")}\n  via ${(new Error().stack ?? "").split("\n").slice(2, 7).map((l) => l.trim()).join("\n  via ")}`)
   return out
 }
 
@@ -91,7 +93,9 @@ const walletStore: WalletStore = {
   main: () => { const pk = ks.main(); const w = pk ? ks.get(pk) : null; return w ? info(w) : null },
   assertBackedUp: (pk) => ks.assertBackedUp(pk),
   keypairOf: (pk) => signerOf(pk, ks.signerSecret(pk)),
-  create: (count, role, label) => createWallets(count, role, label),
+  // a wallet the launch executor makes itself (a "new wallet" row that reached it) is backed up on the spot, like the
+  // Launch page does: the key file downloads first, then the wallet is marked usable. Never a wallet left un-backed-up.
+  create: (count, role, label) => { if (!(count >= 1)) return []; const out = createWallets(count, role, label); ks.downloadBackup(); return out.map((w) => ({ ...w, backedUp: true })) },
   backupNote: (w) => `is backed up (key downloaded; kept in ${KEYS_HOME})`,
 }
 
@@ -138,9 +142,21 @@ function subscribeLaunch(id: string, cb: (e: launch.LaunchEvent) => void): () =>
 const locks = () => (typeof navigator !== "undefined" && "locks" in navigator ? navigator.locks : null)
 const launchLock = (id: string) => `${P}.launch.${id}`
 
+let running = 0
+const holdPage = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = "" }
+
 /** Run a prepared launch in this tab, holding a lock so another tab can tell it is still running. */
 function runInTab(rec: launch.LaunchRecord, form: launch.LaunchForm): void {
-  const go = () => launch.runLaunch(env(), rec, form, emitter(rec.id))
+  // while a launch runs in this tab, leaving or reloading the page asks first: the launch lives in this tab and a
+  // reload mid-funding stops it (the SOL already sent stays in the wallets; Collect all brings it back)
+  const go = async () => {
+    running++
+    if (running === 1) window.addEventListener("beforeunload", holdPage)
+    try { await launch.runLaunch(env(), rec, form, emitter(rec.id)) } finally {
+      running--
+      if (running === 0) window.removeEventListener("beforeunload", holdPage)
+    }
+  }
   const l = locks()
   if (l) void l.request(launchLock(rec.id), go)
   else void go()
@@ -259,10 +275,22 @@ route("POST", /^\/api\/wallets\/export$/, async (req) => {
   return ok({ wallets: ks.secrets(targets).map((r) => ({ publicKey: r.publicKey, privateKey: r.privateKey, label: r.label, file: KEYS_HOME })) })
 })
 route("POST", /^\/api\/wallets\/archive$/, async (req) => {
+  const b = await body<{ publicKeys: string[]; allowMain?: boolean }>(req)
+  const targets = strings(b.publicKeys)
+  if (!targets.length) throw new RouteError("publicKeys: at least one wallet")
+  return ok({ archived: ks.archive(targets, b.allowMain === true), dir: `${KEYS_HOME} (archived wallets stay in every backup and export)` })
+}, 409)
+route("GET", /^\/api\/wallets\/archived$/, async () => {
+  const list = ks.archivedList()
+  const bal = list.length ? await api().balances(list.map((w) => w.publicKey)).catch(() => []) : []
+  const by = new Map(bal.map((b) => [b.wallet, b.sol]))
+  return ok({ wallets: list.map((w) => ({ ...info(w), archivedAt: w.archivedAt, native: by.get(w.publicKey) ?? null })) })
+})
+route("POST", /^\/api\/wallets\/unarchive$/, async (req) => {
   const targets = strings((await body<{ publicKeys: string[] }>(req)).publicKeys)
   if (!targets.length) throw new RouteError("publicKeys: at least one wallet")
-  return ok({ archived: ks.archive(targets), dir: `${KEYS_HOME} (archived wallets stay in every backup and export)` })
-}, 409)
+  return ok({ restored: ks.unarchive(targets) })
+})
 /** Demo only: `Download backup` (the not-yet-backed-up wallets) and `Export all keys` (every wallet). */
 route("POST", /^\/api\/wallets\/backup$/, () => ok(ks.downloadBackup()))
 route("POST", /^\/api\/wallets\/export-all$/, () => ok(ks.exportAll()))
@@ -355,6 +383,7 @@ route("POST", /^\/api\/launch\/simulate$/, async (req) => { const e = env(); e.a
 route("GET", /^\/api\/launch\/([^/]+)$/, (_req, [id]) => { const rec = readLaunches().find((l) => l.id === id); return rec ? ok(rec) : fail(new Error("Launch not found"), 404) })
 
 // IPFS: the visitor's FormData goes straight to the API with their key
+route("POST", /^\/api\/ai\/coin$/, async (req) => ok(await api().aiCoin(await body<{ idea?: string; style?: "meme" | "mascot" | "clean" }>(req))))
 route("POST", /^\/api\/ipfs$/, async (req) => {
   const fd = await req.formData()
   if (!(fd.get("file") instanceof Blob)) throw new RouteError("file (png / jpg / gif / webp, up to 4 MB) is required")
@@ -392,6 +421,11 @@ route("GET", /^\/api\/trading\/creator-fees$/, async (req) => {
   const mint = coin(req)
   if (!mint) throw new RouteError("mint is required")
   return ok(await trading.creatorFees(env(), mint))
+})
+route("GET", /^\/api\/trading\/pnl$/, async (req) => {
+  const mint = coin(req)
+  if (!mint) throw new RouteError("mint is required")
+  return ok(await trading.pnl(env(), mint))
 })
 route("POST", /^\/api\/trading\/creator-fees$/, async (req) => {
   const b = await body<{ mint: string }>(req)

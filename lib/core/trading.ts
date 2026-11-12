@@ -6,10 +6,14 @@
  * No node imports.
  */
 import type { Expected, Quote, TokenInfo } from "../trenchy"
+import { chain } from "../chain"
 import type { Env } from "./launch"
 import type { WalletInfo } from "./wallet-record"
 
 const PRIORITY_FEE_SOL = 0.0005
+/** Sell all builds and sends this many wallets per burst (the API allows 25 requests a second per key) */
+const SELL_WAVE = 20
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export type Holding = WalletInfo & { sol: number; tokens: number; raw: string }
 
@@ -49,14 +53,14 @@ export async function balanceRows(env: Env, mint?: string, quoteMint?: string) {
 export type TradeResult = { publicKey: string; signature: string; action: "buy" | "sell"; expected: Expected; quote: Quote; venue?: string; confirmed: boolean }
 
 /** One wallet sells `percent` of its balance ("NN%" is resolved by the API from the real balance). */
-export async function sell(env: Env, publicKey: string, mint: string, percent: number, slippage = env.slippage): Promise<TradeResult> {
+export async function sell(env: Env, publicKey: string, mint: string, percent: number, slippage = env.slippage, confirmMs = 45_000): Promise<TradeResult> {
   const api = env.api
   const pct = Math.max(1, Math.min(100, Math.round(percent)))
   const kp = env.wallets.keypairOf(publicKey) // the key must be backed up: NotBackedUpError otherwise
   const built = await api.tradeLocal({ publicKey, action: "sell", mint, amount: `${pct}%`, denominatedInQuote: "false", slippage, priorityFee: PRIORITY_FEE_SOL, pool: "auto" })
   built.tx.sign([kp])
   const { signature } = await api.send(built.tx)
-  const confirmed = await api.waitConfirmed(signature, 45_000)
+  const confirmed = await api.waitConfirmed(signature, confirmMs)
   return { publicKey, signature, action: "sell", expected: built.expected, quote: built.quote, venue: built.venue, confirmed }
 }
 
@@ -80,18 +84,102 @@ export type SellAllResult = Array<TradeResult | { publicKey: string; skipped?: s
 
 /** Sell `percent` from each wallet, one after the other (wallets holding none are skipped). */
 export async function sellAll(env: Env, publicKeys: string[], mint: string, percent: number): Promise<SellAllResult> {
-  const rows = await env.api.balances(publicKeys, mint)
+  const api = env.api
+  const rows = await api.balances(publicKeys, mint)
   const held = new Map(rows.map((r) => [r.wallet, r.token?.raw ?? "0"]))
-  const out: SellAllResult = []
-  for (const pk of publicKeys) {
-    if ((held.get(pk) ?? "0") === "0") { out.push({ publicKey: pk, skipped: "holds none" }); continue }
-    try {
-      out.push(await sell(env, pk, mint, percent))
-    } catch (e) {
-      out.push({ publicKey: pk, error: e instanceof Error ? e.message : String(e), code: (e as { code?: string })?.code })
-    }
+  const pct = Math.max(1, Math.min(100, Math.round(percent)))
+  const out: SellAllResult = new Array(publicKeys.length)
+  const fail = (i: number, e: unknown) => { out[i] = { publicKey: publicKeys[i], error: e instanceof Error ? e.message : String(e), code: (e as { code?: string })?.code } }
+  const waves = <T,>(xs: T[], n: number) => Array.from({ length: Math.ceil(xs.length / n) }, (_, k) => xs.slice(k * n, k * n + n))
+
+  // 1. build and sign every sell first (all at once, in waves of SELL_WAVE so the API's 25-a-second cap holds)
+  type Ready = { i: number; tx: Awaited<ReturnType<typeof api.tradeLocal>> }
+  const ready: Ready[] = []
+  const todo = publicKeys.map((pk, i) => ({ pk, i })).filter(({ pk, i }) => {
+    if ((held.get(pk) ?? "0") !== "0") return true
+    out[i] = { publicKey: pk, skipped: "holds none" }
+    return false
+  })
+  for (const wave of waves(todo, SELL_WAVE)) {
+    await Promise.all(wave.map(async ({ pk, i }) => {
+      try {
+        const kp = env.wallets.keypairOf(pk) // the key must be backed up: NotBackedUpError otherwise
+        const built = await api.tradeLocal({ publicKey: pk, action: "sell", mint, amount: `${pct}%`, denominatedInQuote: "false", slippage: env.slippage, priorityFee: PRIORITY_FEE_SOL, pool: "auto" })
+        built.tx.sign([kp])
+        ready.push({ i, tx: built })
+      } catch (e) { fail(i, e) }
+    }))
   }
+
+  // 2. send them all in the same instant (one burst per wave, the waves back to back)
+  const sent: Array<Ready & { signature: string }> = []
+  for (const wave of waves(ready, SELL_WAVE)) {
+    await Promise.all(wave.map(async (r) => {
+      try { sent.push({ ...r, signature: (await api.send(r.tx.tx)).signature }) } catch (e) { fail(r.i, e) }
+    }))
+  }
+
+  // 3. confirm them together (starts spread over a second so the status checks do not all hit at once)
+  await Promise.all(sent.map(async (r, k) => {
+    await sleep((k % 20) * 50)
+    const confirmed = await api.waitConfirmed(r.signature, 25_000).catch(() => false)
+    out[r.i] = { publicKey: publicKeys[r.i], signature: r.signature, action: "sell", expected: r.tx.expected, quote: r.tx.quote, venue: r.tx.venue, confirmed }
+  }))
   return out
+}
+
+export type Pnl = {
+  spent: number; received: number; net: number; trades: number; truncated: boolean
+  /** this coin still held across the wallets */
+  tokensHeld: number
+  /**
+   * What selling everything still held would bring back right now, in the native coin: a live sell quote of all the
+   * tokens at once (slippage and pump.fun's fees in it), minus our API fee and each holder's network fee. null when
+   * nothing is held or no quote came back. An estimate: the final number exists once every wallet has sold.
+   */
+  exitNative: number | null
+  /** wallets still holding the coin */
+  holders: number
+  wallets: Array<{ publicKey: string; label: string; spent: number; received: number; net: number; tokens: number }>
+}
+
+/**
+ * The exact profit or loss of every wallet on this coin (GET /api/sol/pnl, 25 wallets per call): what they paid and got
+ * back in SOL, fees included; transfers between the wallets do not count. For a coin launched here, only transactions
+ * since the launch are read. Wallets that never touched the coin are left out.
+ */
+export async function pnl(env: Env, mint: string): Promise<Pnl> {
+  const wallets = env.wallets.list()
+  const launches = env.launches.list().filter((l) => l.mint === mint)
+  const launch = launches[0]
+  const since = launch ? Math.floor(new Date(launch.createdAt).getTime() / 1000) - 60 : undefined
+  // the wallets in the list, plus every wallet of this coin's launches (archived ones too: only their addresses are needed)
+  const roleOf = new Map<string, string>()
+  for (const l of launches) {
+    const w = l.wallets
+    const add = (pk: string | undefined, role: string) => { if (pk && !roleOf.has(pk)) roleOf.set(pk, role) }
+    add(w.dev, "dev (archived)"); w.bundle.forEach((pk, i) => add(pk, `bundle ${i + 1} (archived)`)); w.sniper.forEach((pk, i) => add(pk, `sniper ${i + 1} (archived)`))
+    w.holder.forEach((pk, i) => add(pk, `later buyer ${i + 1} (archived)`)); (w.volume ?? []).forEach((pk, i) => add(pk, `volume ${i + 1} (archived)`))
+  }
+  const keys = [...new Set([...wallets.map((w) => w.publicKey), ...roleOf.keys()])]
+  if (!keys.length) return { spent: 0, received: 0, net: 0, trades: 0, truncated: false, tokensHeld: 0, exitNative: null, holders: 0, wallets: [] }
+  const parts = []
+  for (let i = 0; i < keys.length; i += 25) parts.push(await env.api.pnl(mint, keys.slice(i, i + 25), since))
+  const held = new Map((await env.api.balances(keys, mint)).map((r) => [r.wallet, r.token?.balance ?? 0]))
+  const label = new Map<string, string>([...roleOf.entries(), ...wallets.map((w) => [w.publicKey, w.label] as [string, string])])
+  const rows = parts.flatMap((p) => p.wallets).map((w) => ({ publicKey: w.wallet, label: label.get(w.wallet) ?? w.wallet.slice(0, 6), spent: w.spent, received: w.received, net: w.net, tokens: held.get(w.wallet) ?? 0 }))
+  const used = rows.filter((r) => r.spent || r.received || r.tokens)
+  const sum = (k: "spent" | "received" | "net") => +used.reduce((s, r) => s + r[k], 0).toFixed(9)
+  const tokensHeld = used.reduce((s, r) => s + r.tokens, 0)
+  const holders = used.filter((r) => r.tokens > 0).length
+  let exitNative: number | null = null
+  if (tokensHeld > 0) {
+    const q = await env.api.quote(mint, "sell", tokensHeld, false).catch(() => null)
+    const out = q?.solOut ?? q?.quoteOut
+    if (typeof out === "number") exitNative = +Math.max(0, out * (1 - chain.apiFeeRate) - holders * (PRIORITY_FEE_SOL + 0.000005)).toFixed(9)
+  }
+  return {
+    exitNative, holders, spent: sum("spent"), received: sum("received"), net: sum("net"), trades: parts.reduce((s, p) => s + p.trades, 0), truncated: parts.some((p) => p.truncated), tokensHeld: used.reduce((s, r) => s + r.tokens, 0), wallets: used }
 }
 
 /** The creator of a coin we launched (from the launch records), else the ★ wallet. */

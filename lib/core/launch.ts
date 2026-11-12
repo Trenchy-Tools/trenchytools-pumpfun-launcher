@@ -29,15 +29,20 @@
 import { Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js"
 import { ApiError, isSolQuote, SOL_PAIR, SOL_QUOTE, type BuiltTx, type Expected, type Pair, type Quote, type Simulation, type TradeBody, type Trenchy } from "../trenchy"
 import { notIn, type Env as BaseEnv } from "./env"
-import type { Role, WalletInfo } from "./wallet-record"
+import { chain } from "../chain"
+import { launchWalletLabel, type Role, type WalletInfo } from "./wallet-record"
 
 /** A Jito bundle holds 5 transactions: the create plus 4. With a lookup table each of the 4 carries 4 buyers. */
 export const PLAIN_BUNDLE_WALLETS = 4
 export const BUYERS_PER_TX = 4
 export const MAX_BUNDLE_WALLETS = PLAIN_BUNDLE_WALLETS * BUYERS_PER_TX
 /** The API fee on the SOL side of every buy (0.5 %), so a wallet funded for a buy can also pay it. */
-const API_FEE = 0.005
-const GAS_RESERVE = 0.01
+const API_FEE = chain.apiFeeRate
+const GAS_RESERVE = chain.gasBuffer
+/** how many funding transfers are in flight at once */
+const FUND_PARALLEL = 5
+/** creating the coin: rent of its accounts + fees, paid by the dev wallet (lib/chain.ts) */
+const CREATE_COST = chain.createCost
 const LUT_RENT_RESERVE = 0.02
 const PRIORITY_FEE_SOL = 0.0005
 /**
@@ -74,8 +79,10 @@ export type LaunchForm = {
   creatorFeeBps: number
   /** the creator fee goes to the holders, permanently */
   holderReward: boolean
-  /** the creator: the ★ wallet when empty */
+  /** the creator: the main wallet when empty */
   devWallet?: string
+  /** the plan only: the dev wallet will be a new wallet made at launch (the Launch page then sends it as devWallet) */
+  devFresh?: boolean
   devBuySol: number
   /**
    * Each buyer group: an explicit list of wallets with their own amounts (the Launch page's "Pick buyers"), or the old
@@ -89,7 +96,66 @@ export type LaunchForm = {
   /** false = no Jito bundle at all: create, then buys one by one */
   useJito: boolean
   slippage: number
+  /** how hard every transaction pushes: the priority fee and the Jito tip (× the Settings tip). Default normal. */
+  speed?: Speed
+  /** the "right after" bundle (useJito off, or the fallback): a random pause between the buys, ms */
+  bundleGap?: { fromMs: number; toMs: number }
+  /** the "right after" bundle: skip the buys still to come once outside wallets have put in more than this, SOL (0 = never) */
+  bundleMaxOutside?: number
+  /** sell automatically after the launch (absent = never) */
+  autoSell?: AutoSell
+  /** claim the creator fees once: after every one of our wallets has sold the coin, or N minutes after the launch (absent = off) */
+  claim?: AutoClaim
+  /** the volume maker (absent = off) */
+  volume?: Volume
 }
+
+/**
+ * Volume maker: `count` wallets (made by the Launch page right before the launch, so their keys are saved first) get
+ * `budget` SOL between them from the main wallet, then buy and sell small amounts at the chosen pace for `minutes`.
+ * It runs only while the coin is live: it stops when the time is up, when auto-sell fires, the moment the main wallet
+ * has sold everything, or when the wallets run dry; then every volume wallet sells what it holds. SOL coins only.
+ */
+export type Volume = { count: number; wallets: string[]; budget: number; pace: "light" | "normal" | "heavy"; minutes: number; size?: "calm" | "normal" | "wild" }
+const VOLUME_PACE: Record<Volume["pace"], [number, number]> = { light: [8000, 15000], normal: [3000, 7000], heavy: [1000, 3000] }
+/**
+ * How big each trade is: a buy spends this share of the wallet's spendable SOL, a sell this % of its tokens, and a
+ * random wallet sells with probability sellP. "runs" (wild): 3-6 buys in a row, then 2-4 sells, so the chart gets
+ * big green and red candles; now and then two trades come quickly (a burst).
+ */
+const VOLUME_SIZE: Record<NonNullable<Volume["size"]>, { buy: [number, number]; sell: [number, number]; sellP: number; runs: boolean }> = {
+  calm: { buy: [0.1, 0.25], sell: [20, 50], sellP: 0.4, runs: false },
+  normal: { buy: [0.15, 0.4], sell: [30, 100], sellP: 0.45, runs: false },
+  wild: { buy: [0.4, 0.9], sell: [60, 100], sellP: 0.5, runs: true },
+}
+const between = ([lo, hi]: [number, number]) => lo + Math.random() * (hi - lo)
+
+export type Speed = "normal" | "fast" | "turbo"
+/** Normal = the Settings tip and a 0.0005 SOL priority fee; Fast and Turbo push harder. */
+export const SPEEDS: Record<Speed, { tipX: number; prioritySol: number }> = {
+  normal: { tipX: 1, prioritySol: 0.0005 },
+  fast: { tipX: 2, prioritySol: 0.001 },
+  turbo: { tipX: 4, prioritySol: 0.002 },
+}
+export const feesOf = (env: Env, form: Pick<LaunchForm, "speed">) => {
+  const s = SPEEDS[form.speed ?? "normal"] ?? SPEEDS.normal
+  return { tipSol: +((env.jitoTipLamports / LAMPORTS_PER_SOL) * s.tipX).toFixed(6), prioritySol: s.prioritySol }
+}
+
+/**
+ * Auto-sell: once outside wallets (not ours) have put in `netIn` SOL more than they took out, or `afterMin` minutes after
+ * the launch (whichever comes first; 0 turns that trigger off), every buyer wallet sells 100 %: all at once, or spread
+ * over `spreadSec`. The main wallet sells with them, `mainLaterSec` later, on its own trigger (`mainNetIn` SOL of
+ * outside money or `mainAfterMin` minutes after the launch, watched separately from the buyers'), or keeps its coins.
+ */
+/** Auto-claim, once: "sold" = when none of our wallets holds the coin any more (after it held some); "after" = afterMin minutes after the launch. */
+export type AutoClaim = { when: "sold" | "after"; afterMin: number }
+
+export type AutoSell = { netIn: number; afterMin: number; bundle: "all" | "spread"; spreadSec: number; main: "with" | "later" | "own" | "keep"; mainLaterSec: number; mainNetIn?: number; mainAfterMin?: number }
+
+/** Whether an auto-sell rule can ever fire (the buyers' trigger, or the main wallet's own). */
+export const autoSellArmed = (a: AutoSell | undefined): boolean =>
+  !!a && (a.netIn > 0 || a.afterMin > 0 || (a.main === "own" && ((a.mainNetIn ?? 0) > 0 || (a.mainAfterMin ?? 0) > 0)))
 
 export type LaunchRecord = {
   id: string
@@ -98,7 +164,7 @@ export type LaunchRecord = {
   mint: string | null
   status: "running" | "confirmed" | "error"
   createdAt: string
-  wallets: { dev: string; bundle: string[]; sniper: string[]; holder: string[] }
+  wallets: { dev: string; bundle: string[]; sniper: string[]; holder: string[]; volume?: string[] }
   signatures: { create?: string; bundleId?: string; snipers: string[]; holders: string[] }
   lookupTable?: string
   /** the pair the coin trades in (absent on records from before custom pairs = SOL) and the create options */
@@ -175,27 +241,34 @@ export function devWallet(env: Env, form: LaunchForm): WalletInfo | null {
 
 /** The SOL rows: unchanged for a SOL coin (buy + 0.5 % fee + 0.01 reserve; dev + tip + table rent). Explicit buyers keep their own amounts. */
 function solRows(env: Env, form: LaunchForm, custom: boolean): { rows: PlanRow[]; tipSol: number; useLut: boolean } {
-  const tipSol = env.jitoTipLamports / LAMPORTS_PER_SOL
+  const { tipSol } = feesOf(env, form)
   const useLut = form.useJito && groupSize(form.bundle) > PLAIN_BUNDLE_WALLETS
   const need = (buy: number) => (custom ? GAS_RESERVE + (buy > 0 ? CUSTOM_PAIR_FEE_RESERVE : 0) : buy * (1 + API_FEE) + GAS_RESERVE)
-  const dev = devWallet(env, form)
-  const rows: PlanRow[] = [{ role: "dev", label: dev?.label ?? (form.devWallet ? `${form.devWallet.slice(0, 6)}… (${notIn(env.wallets)})` : "★ wallet"), publicKey: dev?.publicKey ?? form.devWallet ?? null, buy: form.devBuySol, needSol: need(form.devBuySol) + (form.useJito ? tipSol : 0) + (useLut ? LUT_RENT_RESERVE : 0) }]
+  const dev = form.devFresh ? null : devWallet(env, form)
+  const rows: PlanRow[] = [{ role: "dev", label: form.devFresh ? "new dev wallet (made at launch)" : dev?.label ?? (form.devWallet ? `${form.devWallet.slice(0, 6)}… (${notIn(env.wallets)})` : "Main wallet"), publicKey: form.devFresh ? null : dev?.publicKey ?? form.devWallet ?? null, buy: form.devBuySol, needSol: need(form.devBuySol) + CREATE_COST + (form.useJito ? tipSol : 0) + (useLut ? LUT_RENT_RESERVE : 0) }]
   const group = (role: Exclude<Role, "funding" | "trader">, g: BuyerGroup) => {
     const picked = explicit(g)
     if (picked) {
       picked.forEach((b, i) => {
-        if (!b.publicKey) { rows.push({ role, label: `${role} ${i + 1} (new)`, publicKey: null, buy: b.amount, needSol: need(b.amount) }); return }
+        if (!b.publicKey) { rows.push({ role, label: `${role === "bundle" ? "buyer" : role === "holder" ? "later buyer" : role} ${i + 1} (new)`, publicKey: null, buy: b.amount, needSol: need(b.amount) }); return }
         const w = env.wallets.get(b.publicKey)
         rows.push({ role, label: w?.label ?? `${b.publicKey.slice(0, 6)}… (${notIn(env.wallets)})`, publicKey: b.publicKey, buy: b.amount, needSol: need(b.amount) })
       })
       return
     }
     const have = env.wallets.list(role)
-    for (let i = 0; i < g.count; i++) rows.push({ role, label: have[i]?.label ?? `${role} ${i + 1} (new)`, publicKey: have[i]?.publicKey ?? null, buy: g.solEach, needSol: need(g.solEach) })
+    for (let i = 0; i < g.count; i++) rows.push({ role, label: have[i]?.label ?? `${role === "bundle" ? "buyer" : role === "holder" ? "later buyer" : role} ${i + 1} (new)`, publicKey: have[i]?.publicKey ?? null, buy: g.solEach, needSol: need(g.solEach) })
   }
   group("bundle", form.bundle)
   group("sniper", form.snipers)
   group("holder", form.holders)
+  const v = form.volume
+  if (v && v.count > 0 && !custom) {
+    for (let i = 0; i < v.count; i++) {
+      const pk = v.wallets[i] ?? null
+      rows.push({ role: "trader", label: (pk && env.wallets.get(pk)?.label) || `volume ${i + 1} (new)`, publicKey: pk, buy: 0, needSol: +(v.budget / v.count + GAS_RESERVE).toFixed(6) })
+    }
+  }
   return { rows, tipSol, useLut }
 }
 
@@ -277,11 +350,13 @@ export function planProblems(plan: Plan): string[] {
  * The buyers of a group with their amounts: the explicit list (every wallet must be in the folder), or the first
  * `count` wallets of the role, creating (and backing up) the missing ones. Every returned wallet has its file.
  */
-function pick(env: Env, role: Exclude<Role, "funding" | "trader">, g: BuyerGroup): Picked[] {
+function pick(env: Env, role: Exclude<Role, "funding" | "trader">, g: BuyerGroup, symbol?: string): Picked[] {
   const picked = explicit(g)
   if (picked) {
-    // "new wallet" rows (publicKey null) are created here, all at once, stored before anything else happens
-    const fresh = env.wallets.create(picked.filter((b) => !b.publicKey).length, role, role)
+    // "new wallet" rows (publicKey null) are created here, all at once, stored before anything else happens. Only when
+    // there are some: create(0) used to make one wallet anyway, so every launch left an unused wallet per group, twice.
+    const missing = picked.filter((b) => !b.publicKey).length
+    const fresh = missing > 0 ? env.wallets.create(missing, role, launchWalletLabel(symbol, role)) : []
     return picked.map((b) => {
       const publicKey = b.publicKey ?? fresh.shift()!.publicKey
       env.wallets.assertBackedUp(publicKey) // unknown or not backed up: NotBackedUpError
@@ -290,7 +365,7 @@ function pick(env: Env, role: Exclude<Role, "funding" | "trader">, g: BuyerGroup
     })
   }
   const have = env.wallets.list(role).slice(0, g.count)
-  const made = g.count > have.length ? env.wallets.create(g.count - have.length, role, role) : []
+  const made = g.count > have.length ? env.wallets.create(g.count - have.length, role, launchWalletLabel(symbol, role)) : []
   const all = [...have, ...made].map((w) => ({ ...w, amount: g.solEach }))
   for (const w of all) env.wallets.assertBackedUp(w.publicKey)
   return all
@@ -311,7 +386,7 @@ export function materialize(env: Env, form: LaunchForm): LaunchForm {
   const fill = <G extends BuyerGroup>(g: G, role: Exclude<Role, "funding" | "trader">): G => {
     const picked = explicit(g)
     if (!picked || !picked.some((b) => !b.publicKey)) return g
-    const fresh = env.wallets.create(picked.filter((b) => !b.publicKey).length, role, role)
+    const fresh = env.wallets.create(picked.filter((b) => !b.publicKey).length, role, launchWalletLabel(form.symbol, role))
     return { ...g, wallets: picked.map((b) => ({ publicKey: b.publicKey ?? fresh.shift()!.publicKey, amount: b.amount })) }
   }
   return { ...form, bundle: fill(form.bundle, "bundle"), snipers: fill(form.snipers, "sniper"), holders: fill(form.holders, "holder") }
@@ -324,30 +399,42 @@ export function materialize(env: Env, form: LaunchForm): LaunchForm {
 export async function fundPlan(env: Env, form: LaunchForm, note: (msg: string) => void = () => {}): Promise<Array<{ publicKey: string; role: string; sent: number; signature?: string; error?: string }>> {
   const api = env.api
   const funding = env.wallets.main()
-  if (!funding) throw new Error("No ★ wallet yet: create or import one on the Wallets page")
+  if (!funding) throw new Error("No main wallet yet: create one at the top of the Launch or Wallets page")
   const fundingKp = env.wallets.keypairOf(funding.publicKey)
   form = materialize(env, form)
   const plan = await fundingPlan(env, form)
   if (plan.refusal) throw new ApiError(plan.refusal.error, plan.refusal.status, plan.refusal.code, plan.refusal.hint, plan.refusal.docs)
-  const buyers = [...pick(env, "bundle", form.bundle), ...pick(env, "sniper", form.snipers), ...pick(env, "holder", form.holders)].filter((w) => w.publicKey !== funding.publicKey)
+  const volume = (form.volume?.wallets ?? []).map((pk) => env.wallets.get(pk)).filter((w): w is WalletInfo => !!w)
+  // a dev wallet that is not the main wallet is topped up too (its buy, the tip, the table rent, gas)
+  const dev = devWallet(env, form)
+  const buyers: WalletInfo[] = [...(dev && dev.publicKey !== funding.publicKey ? [dev] : []), ...pick(env, "bundle", form.bundle, form.symbol), ...pick(env, "sniper", form.snipers, form.symbol), ...pick(env, "holder", form.holders, form.symbol), ...volume].filter((w) => w.publicKey !== funding.publicKey)
   if (!buyers.length) return []
   const balances = new Map((await api.balances(buyers.map((b) => b.publicKey))).map((b) => [b.wallet, b.sol]))
-  const out: Array<{ publicKey: string; role: string; sent: number; signature?: string; error?: string }> = []
-  for (const w of buyers) {
-    const need = plan.rows.find((r) => r.publicKey === w.publicKey)?.needSol ?? 0
-    const topUp = Math.round((need - (balances.get(w.publicKey) ?? 0)) * 1e6) / 1e6
-    if (topUp <= 0.0005) { out.push({ publicKey: w.publicKey, role: w.role, sent: 0 }); continue }
-    try {
-      env.wallets.assertBackedUp(w.publicKey)
-      const signature = await api.transferSol(fundingKp, env.wallets.keypairOf(w.publicKey).publicKey, topUp)
-      note(`${w.label}: +${topUp} SOL (${signature.slice(0, 8)}…)`)
-      out.push({ publicKey: w.publicKey, role: w.role, sent: topUp, signature })
-    } catch (e) {
-      const error = e instanceof Error ? e.message : String(e)
-      note(`${w.label}: funding failed: ${error}`)
-      out.push({ publicKey: w.publicKey, role: w.role, sent: 0, error })
+  // every wallet is checked before anything moves (one missing key file stops the whole funding, nothing half-sent)
+  for (const w of buyers) env.wallets.assertBackedUp(w.publicKey)
+  // FUND_PARALLEL top-ups in flight at once: independent transfers from the same main wallet, each sent, re-sent and
+  // confirmed on its own (about 5x faster than one by one; well inside the API's 25 requests a second)
+  const out: Array<{ publicKey: string; role: string; sent: number; signature?: string; error?: string }> = new Array(buyers.length)
+  let next = 0
+  const worker = async () => {
+    while (next < buyers.length) {
+      const i = next++
+      const w = buyers[i]
+      const need = plan.rows.find((r) => r.publicKey === w.publicKey)?.needSol ?? 0
+      const topUp = Math.round((need - (balances.get(w.publicKey) ?? 0)) * 1e6) / 1e6
+      if (topUp <= 0.0005) { out[i] = { publicKey: w.publicKey, role: w.role, sent: 0 }; continue }
+      try {
+        const signature = await api.transferSol(fundingKp, env.wallets.keypairOf(w.publicKey).publicKey, topUp)
+        note(`${w.label}: +${topUp} SOL (${signature.slice(0, 8)}…)`)
+        out[i] = { publicKey: w.publicKey, role: w.role, sent: topUp, signature }
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e)
+        note(`${w.label}: funding failed: ${error}`)
+        out[i] = { publicKey: w.publicKey, role: w.role, sent: 0, error }
+      }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(FUND_PARALLEL, buyers.length) }, worker))
   if (plan.shortfalls.length) note(`Quote asset still missing (this app moves SOL only): ${planProblems(plan).join("; ")}`)
   return out
 }
@@ -365,7 +452,7 @@ const buyBody = (publicKey: string, mint: string, amount: number, slippage: numb
  */
 export function prepareLaunch(env: Env, form: LaunchForm): LaunchRecord {
   const dev = devWallet(env, form)
-  if (!dev) throw new Error(form.devWallet ? `Dev wallet ${form.devWallet.slice(0, 8)}… is ${notIn(env.wallets, true)}` : "No ★ wallet yet: create or import one on the Wallets page")
+  if (!dev) throw new Error(form.devWallet ? `Main wallet ${form.devWallet.slice(0, 8)}… is ${notIn(env.wallets, true)}` : "No main wallet yet: create one at the top of the Launch or Wallets page")
   if (!form.name || !form.symbol) throw new Error("Name and symbol are required")
   if (!form.metadataUri) throw new Error("Upload the image first (the metadata URI is missing)")
   if (form.useJito && groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} bundle buyers (4 transactions of ${BUYERS_PER_TX} with a lookup table); add the rest as snipers or holders`)
@@ -379,7 +466,7 @@ export function prepareLaunch(env: Env, form: LaunchForm): LaunchRecord {
 /** Run a prepared launch to the end. Never throws: a failure is recorded on the launch and emitted as stage "error". */
 export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, emit: Emit): Promise<void> {
   const api = env.api
-  const tipSol = env.jitoTipLamports / LAMPORTS_PER_SOL
+  const { tipSol, prioritySol } = feesOf(env, form)
   const saveLaunch = (r: LaunchRecord) => env.launches.save(r)
   const keypairOf = (pk: string) => env.wallets.keypairOf(pk)
   try {
@@ -396,10 +483,10 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
 
     // 1. wallets
     const devKp = keypairOf(rec.wallets.dev)
-    const bundle = pick(env, "bundle", form.bundle)
-    const snipers = pick(env, "sniper", form.snipers)
-    const holders = pick(env, "holder", form.holders)
-    rec.wallets = { dev: rec.wallets.dev, bundle: bundle.map((w) => w.publicKey), sniper: snipers.map((w) => w.publicKey), holder: holders.map((w) => w.publicKey) }
+    const bundle = pick(env, "bundle", form.bundle, form.symbol)
+    const snipers = pick(env, "sniper", form.snipers, form.symbol)
+    const holders = pick(env, "holder", form.holders, form.symbol)
+    rec.wallets = { dev: rec.wallets.dev, bundle: bundle.map((w) => w.publicKey), sniper: snipers.map((w) => w.publicKey), holder: holders.map((w) => w.publicKey), volume: form.volume?.wallets ?? [] }
     emit("wallets", `Creator ${rec.wallets.dev.slice(0, 8)}… · ${bundle.length} bundle · ${snipers.length} sniper · ${holders.length} holder wallet(s), all backed up`)
 
     // 2. mint
@@ -411,14 +498,14 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
 
     // 3. funding (SOL only; on a custom pair the plan above already made sure every wallet holds its quote asset)
     if (form.fundFirst) {
-      emit("fund", `Funding buyers from the ★ wallet${custom ? " (SOL for fees; the buys are paid in " + sym + ")" : ""}…`)
+      emit("fund", `Funding buyers from the main wallet${custom ? " (SOL for fees; the buys are paid in " + sym + ")" : ""}…`)
       const r = await fundPlan(env, form, (m) => emit("fund", m))
       const failed = r.filter((x) => x.error)
       if (failed.length) throw new Error(`${failed.length} wallet(s) could not be funded; nothing launched`)
       emit("fund", `Funding done (${r.filter((x) => x.sent > 0).length} transfer(s))`)
     }
 
-    const create = createBody(form, rec.wallets.dev, mint, pair, form.useJito ? tipSol : PRIORITY_FEE_SOL)
+    const create = createBody(form, rec.wallets.dev, mint, pair, form.useJito ? tipSol : prioritySol)
     let createSig: string | null = null
 
     if (form.useJito) {
@@ -475,12 +562,12 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
       } else {
         // fallback: the create alone through POST /api/sol/send, then each buyer one by one
         emit("fallback", "Bundle did not land; sending the create on its own, then the buys…")
-        const plain = await api.tradeLocal({ ...create, priorityFee: PRIORITY_FEE_SOL })
+        const plain = await api.tradeLocal({ ...create, priorityFee: prioritySol })
         plain.tx.sign([devKp, mintKp])
         createSig = (await api.send(plain.tx)).signature
         if (!(await api.waitConfirmed(createSig, 60_000, (m) => emit("confirm", m)))) throw new Error(`Create ${createSig.slice(0, 12)}… not confirmed`)
         emit("confirm", `Create confirmed (${createSig.slice(0, 12)}…)`, { signature: createSig })
-        await sequentialBuys(env, mint, bundle, form.slippage, 0, emit, "bundle", custom, sym)
+        await afterBuys(env, mint, bundle, form, emit, custom, sym, prioritySol, ourWallets(rec))
       }
       if (lookupTable) void closeLut(api, lookupTable, devKp, (m) => emit("lut", m))
     } else {
@@ -491,13 +578,19 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
       createSig = (await api.send(plain.tx)).signature
       if (!(await api.waitConfirmed(createSig, 60_000, (m) => emit("confirm", m)))) throw new Error(`Create ${createSig.slice(0, 12)}… not confirmed`)
       emit("confirm", `Create confirmed (${createSig.slice(0, 12)}…)`, { signature: createSig })
-      await sequentialBuys(env, mint, bundle, form.slippage, 0, emit, "bundle", custom, sym)
+      await afterBuys(env, mint, bundle, form, emit, custom, sym, prioritySol, ourWallets(rec))
     }
 
     rec.signatures.create = createSig!
     rec.status = "confirmed"
     saveLaunch(rec)
     emit("live", `Live on pump.fun: https://pump.fun/coin/${mint}${plan.mayhem ? " (Mayhem: pump.fun's agent trades it for 24 h)" : ""}`, { mint, signature: createSig!, link: `https://pump.fun/coin/${mint}` })
+
+    // after the launch: auto-sell watches the coin while the snipers and holders buy; auto-claim runs on its own
+    const stop = { sold: false }
+    const selling = form.autoSell && autoSellArmed(form.autoSell) ? autoSell(env, rec, form.autoSell, mint, emit, stop, prioritySol) : null
+    if (form.claim) void autoClaim(env, rec, mint, form.claim, emit)
+    const volumeRun = form.volume && form.volume.wallets.length ? (custom ? (emit("volume", "Volume maker skipped: it runs on SOL coins only"), null) : volumeMaker(env, rec, form.volume, mint, emit, stop, prioritySol)) : null
 
     // 6. snipers: right now, staggered
     if (snipers.length) {
@@ -514,11 +607,14 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
       const t0 = Date.now()
       for (const [i, w] of holders.entries()) {
         await sleep(Math.max(0, t0 + times[i] - Date.now()))
+        if (stop.sold) { emit("holders", `Auto-sell has sold: the ${holders.length - i} holder buy(s) still to come are skipped`); break }
         const sig = await oneBuy(env, mint, w, w.amount, form.slippage, emit, "holder", custom, sym)
         if (sig) rec.signatures.holders.push(sig)
       }
       saveLaunch(rec)
     }
+    if (selling) await selling
+    if (volumeRun) await volumeRun
     emit("done", "Launch complete", { mint, link: `https://pump.fun/coin/${mint}` })
   } catch (e) {
     rec.status = "error"
@@ -531,10 +627,10 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** One buy: trade-local → sign → send. Failures are logged, never fatal for the launch. `amount` is in the quote asset. */
-async function oneBuy(env: Env, mint: string, w: WalletInfo, amount: number, slippage: number, emit: Emit, stage: string, custom: boolean, sym: string): Promise<string | null> {
+async function oneBuy(env: Env, mint: string, w: WalletInfo, amount: number, slippage: number, emit: Emit, stage: string, custom: boolean, sym: string, prioritySol = PRIORITY_FEE_SOL): Promise<string | null> {
   const api = env.api
   try {
-    const built = await api.tradeLocal(buyBody(w.publicKey, mint, amount, Math.max(slippage, 20), PRIORITY_FEE_SOL, custom))
+    const built = await api.tradeLocal(buyBody(w.publicKey, mint, amount, Math.max(slippage, 20), prioritySol, custom))
     built.tx.sign([env.wallets.keypairOf(w.publicKey)])
     const { signature } = await api.send(built.tx)
     emit(stage, `${w.label} bought ${amount} ${sym} (${signature.slice(0, 12)}…)`, { signature })
@@ -553,6 +649,233 @@ async function sequentialBuys(env: Env, mint: string, wallets: Picked[], slippag
     if (sig) sigs.push(sig)
   }
   return sigs
+}
+
+/** Our own wallets on a launch: their trades never count as outside money. */
+const ourWallets = (rec: LaunchRecord) => new Set([rec.wallets.dev, ...rec.wallets.bundle, ...rec.wallets.sniper, ...rec.wallets.holder, ...(rec.wallets.volume ?? [])])
+
+/** SOL that wallets other than ours have put into the coin, minus what they took out (GET /api/sol/trades). */
+async function outsideNetIn(env: Env, mint: string, ours: Set<string>): Promise<number> {
+  const h = await env.api.tradeHistory(mint, 200)
+  let net = 0
+  for (const t of h.trades) {
+    const trader = String(t.traderPublicKey ?? "")
+    if (!trader || ours.has(trader)) continue
+    const sol = Number(t.solAmount ?? 0)
+    if (t.txType === "buy") net += sol
+    else if (t.txType === "sell") net -= sol
+  }
+  return net
+}
+
+/** The bundle "right after" the launch: one buy after the other with a random pause, skipping the rest once outsiders put in too much. */
+async function afterBuys(env: Env, mint: string, wallets: Picked[], form: LaunchForm, emit: Emit, custom: boolean, sym: string, prioritySol: number, ours: Set<string>): Promise<string[]> {
+  const sigs: string[] = []
+  const lo = Math.max(0, form.bundleGap?.fromMs ?? 0), hi = Math.max(lo, form.bundleGap?.toMs ?? 0)
+  const max = form.bundleMaxOutside ?? 0
+  for (const [i, w] of wallets.entries()) {
+    if (i > 0 && hi > 0) await sleep(lo + Math.random() * (hi - lo))
+    if (max > 0) {
+      const net = await outsideNetIn(env, mint, ours).catch(() => 0)
+      if (net > max) { emit("bundle", `Outside buyers already put in ${net.toFixed(3)} SOL (limit ${max}): the ${wallets.length - i} bundle buy(s) still to come are skipped`); break }
+    }
+    const sig = await oneBuy(env, mint, w, w.amount, form.slippage, emit, "bundle", custom, sym, prioritySol)
+    if (sig) sigs.push(sig)
+  }
+  return sigs
+}
+
+/**
+ * Auto-sell (see AutoSell): check every 3 s, then sell the buyers (all at once or spread) and the main wallet (with them,
+ * later, on its own trigger, or not). The two watchers share one outside-money reading, so the API is read once per tick.
+ */
+async function autoSell(env: Env, rec: LaunchRecord, a: AutoSell, mint: string, emit: Emit, stop: { sold: boolean }, prioritySol: number): Promise<void> {
+  const ours = ourWallets(rec)
+  const t0 = Date.now()
+  let reading: { at: number; net: Promise<number | null> } | null = null
+  const netNow = () => {
+    if (!reading || Date.now() - reading.at > 2500) reading = { at: Date.now(), net: outsideNetIn(env, mint, ours).catch(() => null) }
+    return reading.net
+  }
+  const rule = (netIn: number, afterMin: number) => [netIn > 0 ? `outside buyers put in ${netIn} SOL` : "", afterMin > 0 ? `${afterMin} min pass` : ""].filter(Boolean).join(" or ")
+  /** Resolves with the reason once `netIn` SOL of outside money is in or `afterMin` minutes have passed (0 = that trigger off). */
+  const watch = async (netIn: number, afterMin: number, who: string): Promise<string> => {
+    let lastNote = 0
+    for (;;) {
+      await sleep(3000)
+      if (afterMin > 0 && Date.now() - t0 >= afterMin * 60_000) return `${afterMin} min passed`
+      if (netIn > 0) {
+        const net = await netNow()
+        if (net !== null && net >= netIn) return `outside buyers put in ${net.toFixed(3)} SOL`
+        if (net !== null && Date.now() - lastNote > 30_000) { lastNote = Date.now(); emit("autosell", `Watching (${who}): outside buyers ${net >= 0 ? "+" : ""}${net.toFixed(3)} of ${netIn} SOL`) }
+      }
+    }
+  }
+  const buyersArmed = a.netIn > 0 || a.afterMin > 0
+  const mainNetIn = a.mainNetIn ?? 0
+  const mainAfterMin = a.mainAfterMin ?? 0
+  const mainOwn = a.main === "own" && (mainNetIn > 0 || mainAfterMin > 0)
+  emit("autosell", `Auto-sell armed: ${[buyersArmed ? `buyer wallets sell when ${rule(a.netIn, a.afterMin)}` : "", mainOwn ? `the main wallet sells when ${rule(mainNetIn, mainAfterMin)}` : ""].filter(Boolean).join("; ")}`)
+
+  const sellOne = async (pk: string, who: string) => {
+    try {
+      const built = await env.api.tradeLocal({ publicKey: pk, action: "sell", mint, amount: "100%", denominatedInQuote: "false", slippage: Math.max(env.slippage, 25), priorityFee: prioritySol, pool: "auto" })
+      built.tx.sign([env.wallets.keypairOf(pk)])
+      const { signature } = await env.api.send(built.tx)
+      emit("autosell", `${who} sold everything (${signature.slice(0, 12)}…)`, { signature })
+    } catch (e) {
+      emit("warning", `${who} sell failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+  const label = (pk: string) => env.wallets.get(pk)?.label ?? pk.slice(0, 8)
+  /** All at once: build and sign every sell, then send them all in the same instant (no wallet waits for another's build). */
+  const sellTogether = async (list: Array<{ pk: string; who: string }>) => {
+    const built = await Promise.all(list.map(async ({ pk, who }) => {
+      try {
+        const b = await env.api.tradeLocal({ publicKey: pk, action: "sell", mint, amount: "100%", denominatedInQuote: "false", slippage: Math.max(env.slippage, 25), priorityFee: prioritySol, pool: "auto" })
+        b.tx.sign([env.wallets.keypairOf(pk)])
+        return { who, tx: b.tx }
+      } catch (e) { emit("warning", `${who} sell failed: ${e instanceof Error ? e.message : e}`); return null }
+    }))
+    await Promise.all(built.map(async (b) => {
+      if (!b) return
+      try {
+        const { signature } = await env.api.send(b.tx)
+        emit("autosell", `${b.who} sold everything (${signature.slice(0, 12)}…)`, { signature })
+      } catch (e) { emit("warning", `${b.who} sell failed: ${e instanceof Error ? e.message : e}`) }
+    }))
+  }
+
+  // the main wallet on its own trigger: watched from the launch on, whether the buyers have sold or not
+  const mainOwnRun = mainOwn
+    ? watch(mainNetIn, mainAfterMin, "main wallet").then(async (why) => { emit("autosell", `Main wallet selling: ${why}`); await sellOne(rec.wallets.dev, "Main wallet") })
+    : null
+
+  if (buyersArmed) {
+    const why = await watch(a.netIn, a.afterMin, "buyers")
+    stop.sold = true
+    const buyers = [...rec.wallets.bundle, ...rec.wallets.sniper, ...rec.wallets.holder]
+    emit("autosell", `Selling: ${why}`)
+    const together = a.bundle === "all" || buyers.length < 2
+    const main = a.main === "with" && !together ? sellOne(rec.wallets.dev, "Main wallet") : null
+    if (together) await sellTogether([...(a.main === "with" ? [{ pk: rec.wallets.dev, who: "Main wallet" }] : []), ...buyers.map((pk) => ({ pk, who: label(pk) }))])
+    else {
+      const gap = (Math.max(1, a.spreadSec) * 1000) / (buyers.length - 1)
+      for (const [i, pk] of buyers.entries()) { if (i) await sleep(gap); await sellOne(pk, label(pk)) }
+    }
+    await main
+    if (a.main === "later") { await sleep(Math.max(1, a.mainLaterSec) * 1000); await sellOne(rec.wallets.dev, "Main wallet") }
+  }
+  await mainOwnRun
+  emit("autosell", a.main === "keep" ? "Auto-sell done; the main wallet keeps its coins" : "Auto-sell done")
+}
+
+/** The volume maker (see Volume): one trade at a time from a random volume wallet, until a stop condition, then they sell out. */
+async function volumeMaker(env: Env, rec: LaunchRecord, v: Volume, mint: string, emit: Emit, stop: { sold: boolean }, prioritySol: number): Promise<void> {
+  const ws = v.wallets
+  const [lo, hi] = VOLUME_PACE[v.pace] ?? VOLUME_PACE.normal
+  const size = VOLUME_SIZE[v.size ?? "normal"] ?? VOLUME_SIZE.normal
+  const end = Date.now() + Math.max(1, v.minutes) * 60_000
+  emit("volume", `Volume maker on (${v.size ?? "normal"} trades): ${ws.length} wallets trade ${v.budget} SOL between them for up to ${v.minutes} min. It stops early when the main wallet sells out or auto-sell fires.`)
+  // wild: the direction of the current run and how many trades are left in it
+  const run = { dir: "buy" as "buy" | "sell", left: 0 }
+  let why = ""
+  let trades = 0
+  let mainHad = false
+  let fails = 0
+  while (!why) {
+    // a burst (wild): the next trade comes right away
+    await sleep(size.runs && Math.random() < 0.2 ? 300 + Math.random() * 500 : lo + Math.random() * (hi - lo))
+    if (stop.sold) { why = "auto-sell fired"; break }
+    if (Date.now() >= end) { why = `${v.minutes} min passed`; break }
+    const rows = await env.api.balances([rec.wallets.dev, ...ws], mint).catch(() => null)
+    if (!rows) continue
+    const by = new Map(rows.map((r) => [r.wallet, r]))
+    const mainTokens = by.get(rec.wallets.dev)?.token?.balance ?? 0
+    if (mainTokens > 0) mainHad = true
+    else if (mainHad) { why = "the main wallet sold out"; break }
+    const spend = (pk: string) => (by.get(pk)?.sol ?? 0) - GAS_RESERVE
+    const held = (pk: string) => by.get(pk)?.token?.balance ?? 0
+    if (ws.every((pk) => spend(pk) < 0.005 && held(pk) === 0)) { why = "the volume wallets ran out of SOL"; break }
+    let pk = ws[Math.floor(Math.random() * ws.length)]
+    let sellIt = held(pk) > 0 && (spend(pk) < 0.005 || Math.random() < size.sellP)
+    if (size.runs) {
+      // runs: keep going one way, then turn; a wallet that can make the move is picked for it
+      if (run.left <= 0) { run.dir = run.dir === "buy" ? "sell" : "buy"; run.left = run.dir === "buy" ? 3 + Math.floor(Math.random() * 4) : 2 + Math.floor(Math.random() * 3) }
+      const able = ws.filter((w) => (run.dir === "buy" ? spend(w) >= 0.005 : held(w) > 0))
+      if (!able.length) { run.left = 0; continue }
+      pk = able[Math.floor(Math.random() * able.length)]
+      sellIt = run.dir === "sell"
+      run.left--
+    }
+    if (!sellIt && spend(pk) < 0.005) continue
+    try {
+      const body = sellIt
+        ? { publicKey: pk, action: "sell" as const, mint, amount: `${Math.round(between(size.sell))}%`, denominatedInQuote: "false" as const, slippage: Math.max(env.slippage, 25), priorityFee: prioritySol, pool: "auto" as const }
+        : { publicKey: pk, action: "buy" as const, mint, amount: +Math.max(0.005, spend(pk) * between(size.buy)).toFixed(4), denominatedInSol: "true" as const, slippage: Math.max(env.slippage, 25), priorityFee: prioritySol, pool: "auto" as const }
+      const built = await env.api.tradeLocal(body)
+      built.tx.sign([env.wallets.keypairOf(pk)])
+      await env.api.send(built.tx)
+      trades++
+      fails = 0
+      if (trades % 10 === 0) emit("volume", `Volume maker: ${trades} trades so far`)
+    } catch (e) {
+      if (++fails >= 5) { why = `5 trades in a row failed (${e instanceof Error ? e.message : e})`; break }
+    }
+  }
+  emit("volume", `Volume maker stopped: ${why} (${trades} trades). The volume wallets now sell what they hold…`)
+  const rows = await env.api.balances(ws, mint).catch(() => [])
+  await Promise.all(rows.filter((r) => (r.token?.balance ?? 0) > 0).map(async (r) => {
+    try {
+      const built = await env.api.tradeLocal({ publicKey: r.wallet, action: "sell", mint, amount: "100%", denominatedInQuote: "false", slippage: Math.max(env.slippage, 25), priorityFee: prioritySol, pool: "auto" })
+      built.tx.sign([env.wallets.keypairOf(r.wallet)])
+      await env.api.send(built.tx)
+    } catch (e) {
+      emit("warning", `Volume wallet ${r.wallet.slice(0, 8)}… sell failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }))
+  emit("volume", "Volume wallets sold out. Their SOL stays in them: press Collect all on the Wallets page to bring it back to the main wallet.")
+}
+
+/**
+ * Auto-claim (see AutoClaim), once. "sold": every 15 s for up to 6 h, read our wallets' balances of the coin; the first
+ * time none holds any (after at least one did), claim. "after": wait afterMin minutes, then claim. A failed claim is
+ * tried twice more, a minute apart.
+ */
+async function autoClaim(env: Env, rec: LaunchRecord, mint: string, c: AutoClaim, emit: Emit): Promise<void> {
+  const creator = rec.wallets.dev
+  if (c.when === "after") {
+    emit("claim", `Auto-claim on: the creator fees are claimed ${c.afterMin} min after the launch`)
+    await sleep(Math.max(1, c.afterMin) * 60_000)
+  } else {
+    emit("claim", "Auto-claim on: the creator fees are claimed once every one of your wallets has sold the coin")
+    const ours = [...ourWallets(rec)]
+    let held = false
+    for (const end = Date.now() + 6 * 3600_000; ; ) {
+      if (Date.now() > end) { emit("claim", "Auto-claim stopped: your wallets still hold the coin after 6 h. Claim on the Trading page when you are done."); return }
+      await sleep(15_000)
+      const rows = await env.api.balances(ours, mint).catch(() => null)
+      if (!rows) continue
+      const any = rows.some((r) => (r.token?.balance ?? 0) > 0)
+      if (any) held = true
+      else if (held) break
+    }
+    emit("claim", "Every wallet has sold: claiming the creator fees…")
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const fees = await env.api.creatorFees(creator)
+      if (fees.sol <= 0) { emit("claim", "No creator fees to claim"); return }
+      const built = await env.api.tradeLocal({ publicKey: creator, action: "collectCreatorFee", priorityFee: 0.0001 })
+      built.tx.sign([env.wallets.keypairOf(creator)])
+      const { signature } = await env.api.send(built.tx)
+      emit("claim", `Claimed ${fees.sol.toFixed(4)} SOL of creator fees into the main wallet (${signature.slice(0, 12)}…)`, { signature })
+      return
+    } catch (e) {
+      emit("warning", `Auto-claim try ${attempt}/3: ${e instanceof Error ? e.message : e}`)
+      if (attempt < 3) await sleep(60_000)
+    }
+  }
 }
 
 /** Deactivate the table now; close it once the chain allows (~4 min, 409 cooling_down before), refunding the rent to the dev. */
@@ -595,14 +918,14 @@ export async function simulateLaunch(env: Env, form: LaunchForm): Promise<Simula
   const checks: SimulateResult["checks"] = []
   const plan = await fundingPlan(env, form)
   const funding = devWallet(env, form)
-  if (!funding) throw new Error(form.devWallet ? `Dev wallet ${form.devWallet.slice(0, 8)}… is ${notIn(env.wallets, true)}` : "No ★ wallet yet: create or import one on the Wallets page")
+  if (!funding) throw new Error(form.devWallet ? `Main wallet ${form.devWallet.slice(0, 8)}… is ${notIn(env.wallets, true)}` : "No main wallet yet: create one at the top of the Launch or Wallets page")
   env.wallets.assertBackedUp(funding.publicKey)
-  checks.push({ name: "backup", ok: true, detail: `dev wallet ${funding.publicKey.slice(0, 8)}… ${env.wallets.backupNote(funding)}` })
+  checks.push({ name: "backup", ok: true, detail: `main wallet ${funding.publicKey.slice(0, 8)}… ${env.wallets.backupNote(funding)}` })
 
   const me = await api.me()
   checks.push({ name: "api", ok: true, detail: `connected to ${api.url} (key ${me.keyPrefix ?? "…"})` })
   const balance = await api.solBalance(funding.publicKey)
-  checks.push({ name: "balance", ok: balance >= plan.total, detail: `dev wallet holds ${balance.toFixed(4)} SOL, the plan needs ${plan.total.toFixed(4)} SOL${plan.custom ? " (network fees + our fee; the buys are paid in " + plan.quote.symbol + ")" : ""}` })
+  checks.push({ name: "balance", ok: balance >= plan.total, detail: `main wallet holds ${balance.toFixed(4)} SOL, the plan needs ${plan.total.toFixed(4)} SOL${plan.custom ? " (network fees + our fee; the buys are paid in " + plan.quote.symbol + ")" : ""}` })
   if (plan.custom) checks.push({ name: "pair", ok: plan.shortfalls.length === 0, detail: plan.shortfalls.length ? `short of ${plan.quote.symbol}: ${planProblems({ ...plan, refusal: null }).join("; ")}` : `every wallet holds its ${plan.quote.symbol} (${plan.totalQuote} ${plan.quote.symbol} across the plan)` })
   if (plan.refusal) checks.push({ name: "options", ok: false, detail: planProblems({ ...plan, shortfalls: [] })[0] })
   checks.push({ name: "metadata", ok: !!form.metadataUri, detail: form.metadataUri ? `metadata ${form.metadataUri}` : "no metadata URI yet: upload the image first" })

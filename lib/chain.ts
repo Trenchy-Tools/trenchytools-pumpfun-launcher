@@ -1,11 +1,26 @@
 /**
- * What differs between the pump.fun starter and the pons starter on the shared pages: the chain's name, its native
- * coin, how addresses look, where things are seen, and which extras exist. Client-safe (no node imports). The pages
- * under app/wallets and app/trading and the components are the same files in both apps; only this one differs.
+ * THE CHAIN FILE. Everything the pages, cards and "?" texts need to know about the chain lives here: its name, its native
+ * coin, how addresses look, where things are seen, the launch's fee and gas numbers, and which extras exist. Client-safe
+ * (no node imports). The pages (app/*), the components and lib/help.tsx read this file and never say "SOL" or "pump.fun"
+ * themselves, so another chain (the pons starter on Robinhood Chain, any EVM chain) is mostly a new copy of this file.
+ * See PORTING.md for the rest (the API client, the launch executor, the signer).
  */
 export type ChainConfig = {
+  /** the chain, as people say it ("Solana", "Robinhood Chain") */
   name: string
+  /** the native coin ("SOL", "ETH") */
   symbol: string
+  /** the launchpad people know the coins from ("pump.fun", "pons") */
+  launchpad: string
+  /** the app's name in the header and the tab title ("pump.fun launcher") */
+  appName: string
+  /** which product of the TrenchyTools suite this is (an id in lib/suite.ts): the suite bar marks it "you are here" */
+  suiteId: string
+  /** logos, as paths under public/ (public/logos/ holds Solana, Robinhood, Ethereum, BNB, Base, pump.fun, pons, …) */
+  logo: string
+  launchpadLogo: string
+  /** the block explorer the address and transaction links open */
+  explorer: { name: string; logo: string }
   /** the query / body field a coin travels in on this app's routes */
   coinParam: "mint" | "token"
   coinNoun: string
@@ -17,7 +32,8 @@ export type ChainConfig = {
   fmt: (n: number | null | undefined) => string
   explorerAddress: (address: string) => string
   explorerTx: (sig: string) => string
-  coinLinks: (coin: string) => Array<{ label: string; href: string }>
+  /** where a coin can be seen: the launchpad, terminals, the explorer; `icon` is the site's logo (public/logos/) */
+  coinLinks: (coin: string) => Array<{ label: string; href: string; icon: string }>
   /** GMGN's embeddable candle chart (gmgn.cc is their widget host; gmgn.ai refuses to be framed), or null when the chain has none */
   chartUrl: (coin: string, theme: "dark" | "light") => string | null
   /** the launch-log stream of this app, and one entry of it read into a common shape (the pump.fun and pons routes differ) */
@@ -27,13 +43,46 @@ export type ChainConfig = {
   /** the default of the "Amount each" input (funding) and of a buy */
   defaultEach: string
   defaultBuy: string
+  /** Launch page: the dev-buy chips, the buyer-amount chips and the volume maker's default budget, in the native coin */
+  devBuyChips: string[]
+  buyChips: string[]
+  defaultDevBuy: string
+  defaultVolumeBudget: string
+  /**
+   * What every buyer wallet gets on top of its buy. lib/core/launch.ts funds wallets with exactly these, and the cost
+   * panel shows them, so they never disagree: the API fee on each buy (0.005 = 0.5 %) and a gas buffer per wallet.
+   */
+  apiFeeRate: number
+  gasBuffer: number
+  /**
+   * What creating the coin costs the dev wallet on top of its buy: the rent of the coin's new accounts (mint, metadata,
+   * curve, token accounts) and the network fees. Counted in the plan, the funding and the cost panel, so a fresh dev
+   * wallet keeps its gas buffer for selling later.
+   */
+  createCost: number
+  /** The least a wallet must hold to send any trade (the network fee + the priority fee + what the chain keeps in an account). */
+  minGas: number
+  /** the most bundle buyers one launch can carry */
+  maxBundle: number
+  /** the tip that carries a same-block bundle ("Jito tip"), or null when the chain has none */
+  tipName: string | null
+  /** one line on how bundle buyers land, for the "?" of Bundle buyers (limits, lookup tables, …) */
+  bundleHelp: string
+  /** a vanity address suffix the launchpad uses ("pump"), or null */
+  vanitySuffix: string | null
   features: {
     /** Solana: empty token accounts hold rent that "Close empty token accounts" recovers */
     tokenAccounts: boolean
-    /** pump.fun pays the creator a share of the trading fees */
+    /** the launchpad pays the creator a share of the trading fees */
     creatorFees: boolean
     /** pump.fun Mayhem coins: a buy past the remaining supply needs `partial fill` */
     mayhem: boolean
+    /** bundle buyers can land in the same block as the create ("When: Same block / Right after") */
+    sameBlock: boolean
+    /** coins can be paired with something other than the native coin (USDC, stocks, …) */
+    pairs: boolean
+    /** the creator fee can go to the holders instead */
+    holderRewards: boolean
   }
 }
 
@@ -42,6 +91,12 @@ const ADDR = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
 export const chain: ChainConfig = {
   name: "Solana",
   symbol: "SOL",
+  launchpad: "pump.fun",
+  appName: "pump.fun launcher",
+  suiteId: "pumpfun",
+  logo: "/logos/chains/solana.svg",
+  launchpadLogo: "/logos/launchpads/pumpfun.svg",
+  explorer: { name: "Solscan", logo: "/logos/terminals/solscan.png" },
   coinParam: "mint",
   coinNoun: "mint address",
   keyNoun: "base58 secret key",
@@ -52,12 +107,13 @@ export const chain: ChainConfig = {
   explorerAddress: (a) => `https://solscan.io/account/${a}`,
   explorerTx: (sig) => `https://solscan.io/tx/${sig}`,
   coinLinks: (mint) => [
-    { label: "pump.fun", href: `https://pump.fun/coin/${mint}` },
-    { label: "gmgn", href: `https://gmgn.ai/sol/token/${mint}` },
-    { label: "dexscreener", href: `https://dexscreener.com/solana/${mint}` },
-    { label: "solscan", href: `https://solscan.io/token/${mint}` },
+    { label: "pump.fun", href: `https://pump.fun/coin/${mint}`, icon: "/logos/launchpads/pumpfun.svg" },
+    { label: "GMGN", href: `https://gmgn.ai/sol/token/${mint}`, icon: "/logos/terminals/gmgn.png" },
+    { label: "DEX Screener", href: `https://dexscreener.com/solana/${mint}`, icon: "/logos/terminals/dexscreener.png" },
+    { label: "Solscan", href: `https://solscan.io/token/${mint}`, icon: "/logos/terminals/solscan.png" },
   ],
-  chartUrl: (mint, theme) => `https://www.gmgn.cc/kline/sol/${mint}?theme=${theme}`,
+  // interval=1S: the 1-second candles first (the widget reads `interval` in TradingView form: 1S, 1, 5, 15, 60, 1D)
+  chartUrl: (mint, theme) => `https://www.gmgn.cc/kline/sol/${mint}?theme=${theme}&interval=1S`,
   launchLog: {
     path: (id) => `/api/launch/${id}/events`,
     read: (e) => ({ stage: String(e.stage ?? ""), message: String(e.message ?? ""), done: e.stage === "done" || e.stage === "error", error: e.stage === "error" }),
@@ -65,5 +121,19 @@ export const chain: ChainConfig = {
   pills: ["0.01", "0.05", "0.1", "0.5", "1"],
   defaultEach: "0.05",
   defaultBuy: "0.05",
-  features: { tokenAccounts: true, creatorFees: true, mayhem: true },
+  devBuyChips: ["0.1", "0.25", "0.5", "1", "2"],
+  buyChips: ["0.05", "0.1", "0.25", "0.5", "1"],
+  defaultDevBuy: "0.5",
+  defaultVolumeBudget: "0.5",
+  apiFeeRate: 0.005,
+  gasBuffer: 0.01,
+  // measured: a pump.fun create took ~0.009 SOL (accounts' rent + fees); 0.015 leaves a margin
+  createCost: 0.015,
+  // a sell pays ~0.0005 (priority + network fee) and Solana keeps ~0.0009 in every account: 0.002 is safe
+  minGas: 0.002,
+  maxBundle: 16,
+  tipName: "Jito tip",
+  bundleHelp: "With \"Same block\" the launch is one Jito bundle of 5 transactions (the create + 4 buys): up to 4 buyers get a transaction each; from 5 buyers on, a lookup table (an on-chain address list) is created first so 4 buyers fit in each transaction. Its small rent (about 0.02 SOL) is refunded a few minutes after the launch.",
+  vanitySuffix: "pump",
+  features: { tokenAccounts: true, creatorFees: true, mayhem: true, sameBlock: true, pairs: true, holderRewards: true },
 }

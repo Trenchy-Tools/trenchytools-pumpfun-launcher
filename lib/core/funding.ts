@@ -7,7 +7,7 @@
  *   gather           every lamport but the fee from each wallet back to ★
  *   closeEmpty       close empty token accounts; ★ pays the fee and receives the rent
  */
-import { LAMPORTS_PER_SOL, PublicKey, TransactionInstruction } from "@solana/web3.js"
+import { LAMPORTS_PER_SOL, PublicKey, VersionedTransaction } from "@solana/web3.js"
 import { Buffer } from "buffer"
 import { ApiError, isLegError, Trenchy, type TransferMode } from "../trenchy"
 import type { WalletStore } from "./env"
@@ -23,7 +23,7 @@ export async function fundDirect({ api, wallets }: Ctx, targets: string[], amoun
   if (!targets.length) throw new RouteError("publicKeys: at least one wallet")
   if (!(amount > 0)) throw new RouteError("amount must be greater than zero")
   const funding = wallets.main()
-  if (!funding) throw new RouteError("No ★ wallet yet: create or import one first")
+  if (!funding) throw new RouteError("No main wallet yet: create one first")
   for (const pk of [funding.publicKey, ...targets]) wallets.assertBackedUp(pk)
   const fundingKp = wallets.keypairOf(funding.publicKey)
   const results: Array<{ publicKey: string; signature?: string; error?: string }> = []
@@ -122,13 +122,10 @@ export async function sendDirect({ api, wallets }: Ctx, publicKeys: string[], to
   return { to, total: results.reduce((s, r) => s + r.recovered, 0), results }
 }
 
-/** SPL Token / Token-2022 `CloseAccount` (instruction 9): account, destination (gets the rent), owner (signs). */
-const closeAccountIx = (account: PublicKey, destination: PublicKey, owner: PublicKey, program: PublicKey) =>
-  new TransactionInstruction({ programId: program, keys: [{ pubkey: account, isSigner: false, isWritable: true }, { pubkey: destination, isSigner: false, isWritable: true }, { pubkey: owner, isSigner: true, isWritable: false }], data: Buffer.from([9]) })
-
 /**
- * Close every empty token account (GET /api/sol/balances?wallet=…&includeEmpty=true) of each wallet; the ★ wallet pays
- * the fee and receives the rent (~0.002 SOL per account).
+ * Close every empty token account of each wallet: POST /api/sol/close-accounts builds the transactions (the main
+ * wallet pays the network fee and receives the rent, ~0.002 SOL per account); this app signs them with the main
+ * wallet and the owner, and sends them.
  */
 export async function closeEmpty({ api, wallets }: Ctx, targets: string[]) {
   if (!targets.length) throw new RouteError("publicKeys: at least one wallet")
@@ -140,14 +137,14 @@ export async function closeEmpty({ api, wallets }: Ctx, targets: string[]) {
   for (const pk of targets) {
     try {
       const kp = wallets.keypairOf(pk)
-      const empty = (await api.tokenAccounts(pk, true)).filter((a) => a.raw === "0")
-      let closed = 0
-      for (let i = 0; i < empty.length; i += 10) {
-        const chunk = empty.slice(i, i + 10)
-        await api.sendInstructions(fundingKp, chunk.map((a) => closeAccountIx(new PublicKey(a.account), fundingKp.publicKey, kp.publicKey, new PublicKey(a.program))), kp.publicKey.equals(fundingKp.publicKey) ? [] : [kp], false)
-        closed += chunk.length
+      const built = await api.closeAccounts({ owner: pk, destination: funding.publicKey, payer: funding.publicKey })
+      const signers = kp.publicKey.equals(fundingKp.publicKey) ? [fundingKp] : [fundingKp, kp]
+      for (const t of built.transactions) {
+        const tx = VersionedTransaction.deserialize(Buffer.from(t, "base64"))
+        Trenchy.checkClose(tx, fundingKp.publicKey, kp.publicKey, fundingKp.publicKey)
+        await api.sendBuilt(async () => tx, signers, false)
       }
-      results.push({ publicKey: pk, closed })
+      results.push({ publicKey: pk, closed: built.accounts.length })
     } catch (e) {
       results.push({ publicKey: pk, closed: 0, error: e instanceof Error ? e.message : String(e) })
     }

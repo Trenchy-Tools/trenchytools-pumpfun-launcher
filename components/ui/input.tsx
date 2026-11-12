@@ -12,13 +12,8 @@ export function Textarea({ className, ...props }: React.ComponentProps<"textarea
   return <textarea data-slot="textarea" className={cn(field, "h-auto min-h-20 py-2", className)} {...props} />
 }
 
-export function Select({ className, children, ...props }: React.ComponentProps<"select">) {
-  return (
-    <select data-slot="select" className={cn(field, "appearance-none bg-[length:12px] bg-[position:right_0.6rem_center] bg-no-repeat pr-8", className)} style={{ backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239a9aa2' stroke-width='2'><path d='m6 9 6 6 6-6'/></svg>\")" }} {...props}>
-      {children}
-    </select>
-  )
-}
+/** The drop-down: components/ui/select.tsx (styled list, same props as <select>). */
+export { Select } from "./select"
 
 /** A labelled control; `hint` sits under it in muted text. */
 export function Field({ label, hint, className, children }: { label: React.ReactNode; hint?: React.ReactNode; className?: string; children: React.ReactNode }) {

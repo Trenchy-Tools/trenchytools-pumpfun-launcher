@@ -42,9 +42,9 @@ export function StatusStrip({ status, onOpenSettings }: { status: Status | null;
           {api.connected ? `key ${api.keyPrefix ?? "ok"}` : api.configured ? (api.code ?? "key rejected") : DEMO && status.keyError ? (status.keyError.code ?? "no API key") : "no API key"}
         </Pill>
       </button>
-      <Pill tone={status.funding ? (status.funding.backedUp ? "muted" : "bad") : "warn"} title={status.funding ? `★ ${status.funding.label} · ${status.funding.publicKey}${status.funding.backedUp ? "" : " · not backed up yet"}` : "Create a wallet on the Wallets page: the first one becomes ★"}>
+      <Pill tone={status.funding ? (status.funding.backedUp ? "muted" : "bad") : "warn"} title={status.funding ? `Main wallet ${status.funding.label} · ${status.funding.publicKey}${status.funding.backedUp ? "" : " · not backed up yet"}` : "Create the main wallet on the Launch or Wallets page"}>
         <Wallet className="size-3" />
-        {status.funding ? `★ ${short(status.funding.publicKey)} · ${sol(status.funding.sol, 3)}` : "no ★ wallet"}
+        {status.funding ? `Main wallet ${short(status.funding.publicKey)} · ${sol(status.funding.sol, 3)}` : "no main wallet"}
       </Pill>
       {DEMO ? (
         <Pill tone={pending ? "bad" : "muted"} className="hidden sm:inline-flex" title={pending ? `${pending} wallet${pending === 1 ? "" : "s"} not backed up yet: download the backup before funding` : "Every key is backed up. Clearing this site's data deletes the keys stored here."}>
