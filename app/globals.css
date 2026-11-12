@@ -21,6 +21,7 @@
   --accent-foreground: #0b0b0c;
   --destructive: oklch(0.577 0.245 27.325);
   --ok: oklch(0.55 0.15 150);
+  --brand: oklch(0.55 0.15 150); /* the accent: buttons, the main wallet, our trades, flashes */
   --warn: oklch(0.68 0.16 70);
   --border: #e6e6e9;
   --input: #e6e6e9;
@@ -46,6 +47,7 @@
   --accent-foreground: #ededed;
   --destructive: oklch(0.704 0.191 22.216);
   --ok: oklch(0.78 0.14 150);
+  --brand: oklch(0.78 0.14 150);
   --warn: oklch(0.8 0.14 80);
   --border: #212125;
   --input: #2a2a2e;
@@ -69,6 +71,7 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-ok: var(--ok);
+  --color-brand: var(--brand);
   --color-warn: var(--warn);
   --color-border: var(--border);
   --color-input: var(--input);
@@ -129,7 +132,7 @@
 }
 /* the "?" of an option that was just switched on */
 @keyframes tt-wiggle {
-  0% { transform: rotate(0) scale(1); box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 60%, transparent); }
+  0% { transform: rotate(0) scale(1); box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 60%, transparent); }
   100% { transform: rotate(0) scale(1); box-shadow: 0 0 0 10px transparent; }
   10% { transform: rotate(-18deg) scale(1.35); }
   20% { transform: rotate(16deg) scale(1.35); }
@@ -139,9 +142,9 @@
   60% { transform: rotate(6deg) scale(1.15); }
   70% { transform: rotate(-3deg) scale(1.1); }
 }
-/* a line that just changed: a green wash that fades */
+/* a line that just changed: a wash of the brand colour that fades */
 @keyframes tt-flash {
-  0% { background-color: color-mix(in oklab, var(--ok) 30%, transparent); color: var(--ok); }
+  0% { background-color: color-mix(in oklab, var(--brand) 30%, transparent); color: var(--brand); }
   100% { background-color: transparent; }
 }
 .tt-flash { border-radius: 4px; animation: tt-flash 1.4s ease-out; }

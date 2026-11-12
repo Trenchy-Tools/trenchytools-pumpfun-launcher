@@ -30,6 +30,8 @@ export type ChainConfig = {
   short: (s: string) => string
   /** a native amount for a table cell */
   fmt: (n: number | null | undefined) => string
+  /** how many decimals a native amount shows in the cost panel (SOL 4, ETH 5: its amounts are ten times smaller) */
+  decimals: number
   explorerAddress: (address: string) => string
   explorerTx: (sig: string) => string
   /** where a coin can be seen: the launchpad, terminals, the explorer; `icon` is the site's logo (public/logos/) */
@@ -60,6 +62,8 @@ export type ChainConfig = {
    * wallet keeps its gas buffer for selling later.
    */
   createCost: number
+  /** what createCost pays for, in a few words (the cost panel's note) */
+  createCostNote: string
   /** The least a wallet must hold to send any trade (the network fee + the priority fee + what the chain keeps in an account). */
   minGas: number
   /** the most bundle buyers one launch can carry */
@@ -70,6 +74,29 @@ export type ChainConfig = {
   bundleHelp: string
   /** a vanity address suffix the launchpad uses ("pump"), or null */
   vanitySuffix: string | null
+  /**
+   * EVM chains only (absent on Solana): where the API serves the chain and what its launchpad needs. The EVM core
+   * (lib/trenchy.ts, lib/core/*) reads this, so another EVM chain is mostly a new copy of this file.
+   */
+  evm?: {
+    /** the API prefix: "/api/rh", "/api/bnb", "/api/elysium", "/api/base" */
+    api: string
+    chainId: number
+    /** the API streams this chain's trades on a websocket (wss://…<api>/data); otherwise the app polls GET <api>/trades */
+    ws: boolean
+    /** the launchpad a create goes to (the API's `venue`) */
+    createVenue?: string
+    /** the launchpad lets the creator name wallets that skip its launch-window tax (pons, up to 31) */
+    exemptList: boolean
+    /** the smallest buy the launchpad takes, in the native coin */
+    minBuy: number
+    /** the coin's supply, for the market cap (price × supply) when the API does not say */
+    totalSupply: number
+    /** the chain's name on POST /api/transfer (exchange-routed funding) */
+    transferChain: string
+    /** seconds after the create before any other buy (a launchpad that taxes its first seconds, e.g. Clanker's 20 s anti-snipe) */
+    launchQuietS?: number
+  }
   features: {
     /** Solana: empty token accounts hold rent that "Close empty token accounts" recovers */
     tokenAccounts: boolean
@@ -104,6 +131,7 @@ export const chain: ChainConfig = {
   isCoin: (s) => ADDR.test(s.trim()),
   short: (s) => (s.length > 11 ? `${s.slice(0, 4)}…${s.slice(-4)}` : s),
   fmt: (n) => (n === null || n === undefined ? "–" : n.toFixed(4)),
+  decimals: 4,
   explorerAddress: (a) => `https://solscan.io/account/${a}`,
   explorerTx: (sig) => `https://solscan.io/tx/${sig}`,
   coinLinks: (mint) => [
@@ -129,6 +157,7 @@ export const chain: ChainConfig = {
   gasBuffer: 0.01,
   // measured: a pump.fun create took ~0.009 SOL (accounts' rent + fees); 0.015 leaves a margin
   createCost: 0.015,
+  createCostNote: "account rent + network fees",
   // a sell pays ~0.0005 (priority + network fee) and Solana keeps ~0.0009 in every account: 0.002 is safe
   minGas: 0.002,
   maxBundle: 16,

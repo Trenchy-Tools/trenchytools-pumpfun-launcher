@@ -31,8 +31,10 @@ const ORG = SUITE.github
 export const LAUNCHERS: SuiteItem[] = [
   { id: "pumpfun", name: "pump.fun", sub: "Solana", url: "https://pumpfun.trenchy.tools", repo: `${ORG}/trenchytools-pumpfun-launcher`, logo: "/logos/launchpads/pumpfun.svg", status: "live" },
   { id: "pons", name: "pons", sub: "Robinhood Chain", url: "https://pons.trenchy.tools", repo: `${ORG}/trenchytools-pons-launcher`, logo: "/logos/launchpads/pons.png", status: "live" },
-  { id: "elysium", name: "Elysium", sub: "Hyperliquid L2", url: null, repo: null, logo: "/logos/chains/elysium.svg", status: "soon" },
-  { id: "bnb", name: "four.meme", sub: "BNB Chain", url: null, repo: null, logo: "/logos/chains/bnb.svg", status: "soon" },
+  { id: "bnb", name: "Flap", sub: "BNB Chain", url: "https://bnb.trenchy.tools", repo: `${ORG}/trenchytools-bnb-launcher`, logo: "/logos/launchpads/flap.png", status: "live" },
+  // private for now (the user's call): no hosted page or public repo yet
+  { id: "elysium", name: "Montra", sub: "Elysium (Hyperliquid L2)", url: null, repo: null, logo: "/logos/chains/elysium.svg", status: "soon" },
+  { id: "base", name: "Clanker", sub: "Base", url: "https://base.trenchy.tools", repo: `${ORG}/trenchytools-base-launcher`, logo: "/logos/launchpads/clanker.png", status: "live" },
 ]
 
 export const TOOLS: SuiteItem[] = [

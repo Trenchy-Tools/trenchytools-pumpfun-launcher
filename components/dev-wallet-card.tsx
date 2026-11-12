@@ -121,13 +121,13 @@ export function DevWalletCard({ need, onChanged, className, keyButton = true }: 
   const pending = !!main && !!folder?.pending?.some((p) => p.publicKey === main)
   const others = (folder?.wallets ?? []).filter((w) => w.publicKey !== main)
 
-  const badge = <span className="bg-ok text-background rounded-md px-2 py-0.5 text-[11px] font-bold tracking-[0.15em] uppercase">Main wallet</span>
+  const badge = <span className="bg-brand text-background rounded-md px-2 py-0.5 text-[11px] font-bold tracking-[0.15em] uppercase">Main wallet</span>
 
   if (!folder) return <div className={cn("rounded-xl border p-4 text-sm", className)}><span className="text-muted-foreground">Loading the main wallet…</span></div>
 
   if (!main) {
     return (
-      <div className={cn("border-ok/50 bg-ok/5 flex flex-col gap-3 rounded-xl border-2 border-dashed p-4", className)}>
+      <div className={cn("border-brand/50 bg-brand/5 flex flex-col gap-3 rounded-xl border-2 border-dashed p-4", className)}>
         <div className="flex flex-wrap items-center gap-2">{badge}<Q k="mainWallet" /><span className="text-sm font-semibold">You don&apos;t have one yet</span></div>
         <p className="text-muted-foreground text-sm">The main wallet creates your coin and pays for every buy. Make one, send it {chain.symbol}, and you are ready to launch.</p>
         {others.length ? (
@@ -167,7 +167,7 @@ export function DevWalletCard({ need, onChanged, className, keyButton = true }: 
           : { tone: "text-ok", text: "● Ready." }
 
   return (
-    <div className={cn("border-ok/50 bg-ok/[0.04] flex flex-col gap-1.5 rounded-xl border-2 px-4 py-3", className)}>
+    <div className={cn("border-brand/50 bg-brand/[0.04] flex flex-col gap-1.5 rounded-xl border-2 px-4 py-3", className)}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <span className="inline-flex items-center gap-1.5">{badge}<Q k="mainWallet" /></span>
         <button type="button" className="hover:bg-accent inline-flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors" title={`${main} · click to copy`} onClick={() => { void copyText(main); toast({ tone: "muted", title: "Main wallet address copied" }) }}>

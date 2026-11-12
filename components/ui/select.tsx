@@ -139,7 +139,7 @@ export function Select({ className, children, value, onChange, disabled, id, "ar
                     className={cn("flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs", i === active && !o.disabled && "bg-muted", o.disabled && "cursor-not-allowed opacity-40")}
                   >
                     <span className="flex min-w-0 flex-1"><Label label={o.label} muted={o.value === ""} /></span>
-                    {o.value === selected?.value ? <Check className="text-ok size-3.5 shrink-0" /> : null}
+                    {o.value === selected?.value ? <Check className="text-brand size-3.5 shrink-0" /> : null}
                   </div>
                 </React.Fragment>
               ))}

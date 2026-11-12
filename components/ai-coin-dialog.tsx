@@ -60,7 +60,7 @@ export function AiCoinDialog({ open, onClose, onUse }: { open: boolean; onClose:
   const out = left && (left.hour === 0 || left.day === 0)
 
   return (
-    <Dialog open={open} onClose={() => { if (!busy) onClose() }} title={<span className="inline-flex items-center gap-2"><Sparkles className="text-ok size-4" />Create your coin with AI</span>}>
+    <Dialog open={open} onClose={() => { if (!busy) onClose() }} title={<span className="inline-flex items-center gap-2"><Sparkles className="text-brand size-4" />Create your coin with AI</span>}>
       <p className="text-muted-foreground -mt-1 text-xs">Describe it in a few words, or leave it empty and let the AI surprise you. You get the name, ticker, description and logo; change anything after.</p>
       <div className="flex flex-col gap-2">
         <Input value={idea} maxLength={200} onChange={(e) => setIdea(e.target.value)} placeholder={`e.g. ${IDEAS[0]}`} disabled={busy} onKeyDown={(e) => { if (e.key === "Enter" && !busy && !out) void generate() }} aria-label="Your idea" />
@@ -69,7 +69,7 @@ export function AiCoinDialog({ open, onClose, onUse }: { open: boolean; onClose:
         </div>
         <div className="grid grid-cols-3 gap-1.5">
           {STYLES.map((s) => (
-            <button key={s.id} type="button" disabled={busy} onClick={() => setStyle(s.id)} className={cn("flex flex-col items-start rounded-lg border px-2.5 py-1.5 text-left transition-colors", style === s.id ? "border-ok bg-ok/10" : "hover:bg-muted")}>
+            <button key={s.id} type="button" disabled={busy} onClick={() => setStyle(s.id)} className={cn("flex flex-col items-start rounded-lg border px-2.5 py-1.5 text-left transition-colors", style === s.id ? "border-brand bg-brand/10" : "hover:bg-muted")}>
               <span className="text-sm font-medium">{s.label}</span>
               <span className="text-muted-foreground text-[10px] leading-tight">{s.hint}</span>
             </button>
@@ -100,7 +100,7 @@ export function AiCoinDialog({ open, onClose, onUse }: { open: boolean; onClose:
       <FailureBox failure={failure} />
 
       <div className="flex flex-wrap items-center gap-2">
-        {made && !busy ? <Button onClick={use} className="bg-ok hover:bg-ok/90 text-background">Use this</Button> : null}
+        {made && !busy ? <Button onClick={use} className="bg-brand hover:bg-brand/90 text-background">Use this</Button> : null}
         <Button variant={made ? "outline" : "default"} onClick={() => void generate()} disabled={busy || !!out}>
           {busy ? "Creating…" : made ? <><RefreshCw className="size-3.5" />Try again</> : <><Sparkles className="size-3.5" />Generate</>}
         </Button>

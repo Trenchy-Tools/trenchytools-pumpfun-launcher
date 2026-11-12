@@ -124,7 +124,7 @@ export default function TradingPage() {
   // Buy all / Sell all / Later act on every wallet, the dev wallet too unless "include the dev wallet" is off.
   const bulkTargets = wallets.filter((w) => includeDev || w.publicKey !== main).map((w) => w.publicKey)
   /** Buy all only uses wallets that can pay: the amount, the API fee and a little for gas (on a SOL coin). */
-  const canBuy = (a: number) => bulkTargets.filter((pk) => token?.custom || (row(pk)?.native ?? 0) >= a * (1 + chain.apiFeeRate) + 0.002)
+  const canBuy = (a: number) => bulkTargets.filter((pk) => token?.custom || (row(pk)?.native ?? 0) >= a * (1 + chain.apiFeeRate) + chain.minGas)
   const skipDev = !includeDev
   // the dev wallet first, then the rest
   const ordered = [...wallets].sort((a, b) => (a.publicKey === main ? -1 : b.publicKey === main ? 1 : 0))
@@ -167,7 +167,15 @@ export default function TradingPage() {
   React.useEffect(() => {
     setToken(null); setPartialFill(false)
     if (!valid) return
-    get<Token>(`/api/trading/token?${q(coin)}`).then((t) => { setToken(t); writeChosenCoin({ coin, symbol: t.symbol ?? undefined }) }).catch(() => { setToken(null); writeChosenCoin({ coin }) })
+    // tried again a few times: on a first visit the demo's API key is still being made when the page asks
+    let stop = false
+    const read = (left: number) => get<Token>(`/api/trading/token?${q(coin)}`).then((t) => { if (stop) return; setToken(t); writeChosenCoin({ coin, symbol: t.symbol ?? undefined }) }).catch(() => {
+      if (stop) return
+      setToken(null); writeChosenCoin({ coin })
+      if (left > 0) setTimeout(() => { if (!stop) void read(left - 1) }, 3000)
+    })
+    void read(3)
+    return () => { stop = true }
   }, [coin, valid]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // timers: the list every 5 s while one is pending
@@ -458,7 +466,7 @@ export default function TradingPage() {
     <div className={CELL} title={fees ? `Creator: ${fees.creator}` : undefined}>
       <Tag tone="muted">Fees</Tag><Q k="creatorFees" />
       <span className="text-muted-foreground">creator fees</span>
-      <span className={cn("font-mono tabular-nums", fees && fees.sol > 0 ? "text-ok" : "")}>{fees ? `${fees.sol.toFixed(4)} ${chain.symbol}` : "–"}</span>
+      <span className={cn("font-mono tabular-nums", fees && fees.sol > 0 ? "text-ok" : "")}>{fees ? `${fees.sol.toFixed(chain.decimals)} ${chain.symbol}` : "–"}</span>
       <span className="text-muted-foreground hidden sm:inline">unclaimed</span>
       <span className="ml-auto inline-flex gap-1.5"><Button size="xs" variant="outline" onClick={claim} disabled={!fees || fees.sol <= 0 || !!busy}>{busy === "claim" ? "Claiming…" : "Claim"}</Button>{closeOutBtn}</span>
     </div>
@@ -487,9 +495,9 @@ export default function TradingPage() {
         const has = (r?.tokens ?? 0) > 0
         const isDev = w.publicKey === main
         if (phone) return (
-          <div key={w.publicKey} className={cn("flex items-center gap-1.5 px-2 py-1", isDev ? "bg-ok/5" : "")}>
+          <div key={w.publicKey} className={cn("flex items-center gap-1.5 px-2 py-1", isDev ? "bg-brand/5" : "")}>
             <span className="flex min-w-0 flex-1 items-center gap-1">
-              {isDev ? <span className="bg-ok text-background rounded px-1 py-px text-[9px] font-bold tracking-widest uppercase">Main</span> : <span className="truncate font-medium">{w.label}</span>}
+              {isDev ? <span className="bg-brand text-background rounded px-1 py-px text-[9px] font-bold tracking-widest uppercase">Main</span> : <span className="truncate font-medium">{w.label}</span>}
             </span>
             <span className="w-14 text-right font-mono text-[11px] tabular-nums">{chain.fmt(r?.native)}</span>
             <span className={cn("w-10 text-right font-mono text-[11px] tabular-nums", has ? "" : "text-muted-foreground")}>{fmtTokens(r?.tokens)}</span>
@@ -498,9 +506,9 @@ export default function TradingPage() {
           </div>
         )
         return (
-          <div key={w.publicKey} className={cn(ROW, "py-1", isDev ? "bg-ok/5" : "")}>
+          <div key={w.publicKey} className={cn(ROW, "py-1", isDev ? "bg-brand/5" : "")}>
             <div className="flex min-w-0 flex-[1_1_9rem] items-center gap-1.5">
-              {isDev ? <span className="bg-ok text-background rounded px-1 py-px text-[9px] font-bold tracking-widest uppercase">Main</span> : null}
+              {isDev ? <span className="bg-brand text-background rounded px-1 py-px text-[9px] font-bold tracking-widest uppercase">Main</span> : null}
               <span className="truncate font-medium">{isDev ? "Main wallet" : w.label}</span>
               <Mono className="text-muted-foreground hidden text-[11px] sm:inline">{chain.short(w.publicKey)}</Mono>
             </div>
@@ -573,7 +581,7 @@ export default function TradingPage() {
 
       {valid ? (
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
-          <Chart coin={coin} className="min-w-0" />
+          <Chart coin={coin} trades={trades.filter((t) => t.tokens > 0 && nativeOf(t) > 0).map((t) => ({ timestamp: t.timestamp, price: nativeOf(t) / t.tokens, native: nativeOf(t), type: t.type }))} className="min-w-0" />
 
           {/* next to the chart: profit / loss on top, the live trades fill the rest of the chart's height */}
           <div className="flex min-h-80 min-w-0 flex-col overflow-hidden rounded-xl border text-xs">
@@ -587,12 +595,12 @@ export default function TradingPage() {
                 pnl.trades === 0 ? <p className="text-muted-foreground">None of your wallets has traded this coin yet.</p> : (
                   <>
                     <p className={cn("font-mono text-xl leading-tight font-semibold tabular-nums", pnl.net > 0 ? "text-ok" : pnl.net < 0 ? "text-destructive" : "")}>
-                      <Nudge value={pnl.net.toFixed(4)}>{pnl.net > 0 ? "+" : ""}{pnl.net.toFixed(4)} {chain.symbol}</Nudge>
+                      <Nudge value={pnl.net.toFixed(chain.decimals)}>{pnl.net > 0 ? "+" : ""}{pnl.net.toFixed(chain.decimals)} {chain.symbol}</Nudge>
                     </p>
                     <p className="text-muted-foreground -mt-0.5 text-[10px] tracking-wide uppercase">{pnl.tokensHeld > 0 ? "realised so far" : "final · every wallet has sold"}</p>
                     <div className="text-muted-foreground flex flex-col text-[11px]">
-                      <div className="flex justify-between"><span>Spent (buys + every fee)</span><Mono className="text-[11px]"><Nudge value={pnl.spent.toFixed(4)}>{pnl.spent.toFixed(4)}</Nudge></Mono></div>
-                      <div className="flex justify-between"><span>Got back (sells)</span><Mono className="text-[11px]"><Nudge value={pnl.received.toFixed(4)}>{pnl.received.toFixed(4)}</Nudge></Mono></div>
+                      <div className="flex justify-between"><span>Spent (buys + every fee)</span><Mono className="text-[11px]"><Nudge value={pnl.spent.toFixed(chain.decimals)}>{pnl.spent.toFixed(chain.decimals)}</Nudge></Mono></div>
+                      <div className="flex justify-between"><span>Got back (sells)</span><Mono className="text-[11px]"><Nudge value={pnl.received.toFixed(chain.decimals)}>{pnl.received.toFixed(chain.decimals)}</Nudge></Mono></div>
                       {pnl.tokensHeld > 0 ? (
                         <>
                           {(() => {
@@ -602,8 +610,8 @@ export default function TradingPage() {
                             const total = exit === null ? null : pnl.net + exit
                             return (
                               <>
-                                <div className="flex justify-between"><span>Still holding{pnl.holders ? ` (${pnl.holders} wallet${pnl.holders === 1 ? "" : "s"})` : ""}</span><Mono className="text-[11px]">{fmtTokens(pnl.tokensHeld)} tokens{exit !== null ? ` ≈ ${exit.toFixed(4)}` : ""}</Mono></div>
-                                {total !== null ? <div className="text-foreground mt-0.5 flex justify-between border-t pt-0.5 font-medium" title={quoted ? "A live sell quote of all the tokens at once: the curve's slippage, pump.fun's and our fee and the network fees are in it" : "Last trade's price x tokens: the price drop of selling is not in it"}><span>If you sold everything now ≈</span><Mono className={cn("text-[11px]", total >= 0 ? "text-ok" : "text-destructive")}>{total >= 0 ? "+" : ""}{total.toFixed(4)}</Mono></div> : null}
+                                <div className="flex justify-between"><span>Still holding{pnl.holders ? ` (${pnl.holders} wallet${pnl.holders === 1 ? "" : "s"})` : ""}</span><Mono className="text-[11px]">{fmtTokens(pnl.tokensHeld)} tokens{exit !== null ? ` ≈ ${exit.toFixed(chain.decimals)}` : ""}</Mono></div>
+                                {total !== null ? <div className="text-foreground mt-0.5 flex justify-between border-t pt-0.5 font-medium" title={quoted ? "A live sell quote of all the tokens at once: the curve's slippage, pump.fun's and our fee and the network fees are in it" : "Last trade's price x tokens: the price drop of selling is not in it"}><span>If you sold everything now ≈</span><Mono className={cn("text-[11px]", total >= 0 ? "text-ok" : "text-destructive")}>{total >= 0 ? "+" : ""}{total.toFixed(chain.decimals)}</Mono></div> : null}
                                 <p className="text-muted-foreground/80 text-[10px] leading-snug">Not final until every wallet has sold: the open part is {quoted ? "a live sell quote of all of it at once" : "the last price (no quote yet)"}, and it moves with the price.</p>
                               </>
                             )
@@ -617,7 +625,7 @@ export default function TradingPage() {
                         {pnl.wallets.map((w) => (
                           <div key={w.publicKey} className="flex justify-between gap-2">
                             <span className="truncate">{w.publicKey === main ? "Main wallet" : w.label}</span>
-                            <Mono className={cn("text-[11px]", w.net > 0 ? "text-ok" : w.net < 0 ? "text-destructive" : "")}>{w.net > 0 ? "+" : ""}{w.net.toFixed(4)}</Mono>
+                            <Mono className={cn("text-[11px]", w.net > 0 ? "text-ok" : w.net < 0 ? "text-destructive" : "")}>{w.net > 0 ? "+" : ""}{w.net.toFixed(chain.decimals)}</Mono>
                           </div>
                         ))}
                       </div>
@@ -637,12 +645,12 @@ export default function TradingPage() {
               {trades.map((t) => {
                 const id = txOf(t) ?? `${t.trader}-${t.timestamp}`
                 return (
-                  <div key={id} className={cn("grid grid-cols-[28px_64px_minmax(0,1fr)_auto] items-center gap-1.5 border-l-2 px-2.5 py-0.5", ourTrade(t) ? "border-ok bg-ok/10" : "border-transparent")}>
+                  <div key={id} className={cn("grid grid-cols-[28px_64px_minmax(0,1fr)_auto] items-center gap-1.5 border-l-2 px-2.5 py-0.5", ourTrade(t) ? "border-brand bg-brand/10" : "border-transparent")}>
                     <span className={t.type === "buy" ? "text-ok" : "text-destructive"}>{t.type}</span>
-                    <span className="text-right">{nativeOf(t).toFixed(4)}</span>
+                    <span className="text-right">{nativeOf(t).toFixed(chain.decimals)}</span>
                     <span className="flex min-w-0 items-center gap-1">
                       {txOf(t) ? <a className="truncate underline-offset-4 hover:underline" href={chain.explorerTx(txOf(t)!)} target="_blank" rel="noreferrer">{chain.short(t.trader)}</a> : <span className="truncate">{chain.short(t.trader)}</span>}
-                      {ourTrade(t) ? <span className="bg-ok/20 text-ok truncate rounded px-1 font-sans text-[10px] font-semibold" title="one of your wallets">{ourTrade(t)}</span> : null}
+                      {ourTrade(t) ? <span className="bg-brand/20 text-brand truncate rounded px-1 font-sans text-[10px] font-semibold" title="one of your wallets">{ourTrade(t)}</span> : null}
                     </span>
                     <span className="text-muted-foreground">{ago(t.timestamp)}</span>
                   </div>
@@ -709,7 +717,7 @@ export default function TradingPage() {
 
       <Dialog open={closeOpen} onClose={() => setCloseOpen(false)} title={<>Close out {token?.symbol ?? (valid ? chain.short(coin) : "")}</>}>
         {pnl && pnl.trades > 0 ? (
-          <p className="text-sm">Result{pnl.tokensHeld > 0 ? " so far" : ""}: <b className={cn("font-mono tabular-nums", pnl.net > 0 ? "text-ok" : pnl.net < 0 ? "text-destructive" : "")}>{pnl.net > 0 ? "+" : ""}{pnl.net.toFixed(4)} {chain.symbol}</b> <span className="text-muted-foreground text-xs">(every buy, sell and fee of your wallets)</span></p>
+          <p className="text-sm">Result{pnl.tokensHeld > 0 ? " so far" : ""}: <b className={cn("font-mono tabular-nums", pnl.net > 0 ? "text-ok" : pnl.net < 0 ? "text-destructive" : "")}>{pnl.net > 0 ? "+" : ""}{pnl.net.toFixed(chain.decimals)} {chain.symbol}</b> <span className="text-muted-foreground text-xs">(every buy, sell and fee of your wallets)</span></p>
         ) : null}
         {timersWaiting ? <p className="text-warn text-xs">{timersWaiting} timed sell{timersWaiting === 1 ? " is" : "s are"} still waiting under the wallets; cancel {timersWaiting === 1 ? "it" : "them"} there if the run is over.</p> : null}
         <ol className="flex flex-col divide-y rounded-lg border text-xs">

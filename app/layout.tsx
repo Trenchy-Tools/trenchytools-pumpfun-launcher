@@ -6,6 +6,7 @@ import { TopBar } from "@/components/top-bar"
 import { Toaster } from "@/components/ui/toast"
 import { ConfirmHost } from "@/components/ui/confirm"
 import { chain } from "@/lib/chain"
+import { suiteItem } from "@/lib/suite"
 import "./globals.css"
 
 const sans = Space_Grotesk({ subsets: ["latin"], variable: "--font-space-grotesk" })
@@ -13,7 +14,7 @@ const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], 
 
 const DESCRIPTION = `Launch, bundle and trade ${chain.launchpad} coins on the TrenchyTools API${process.env.NEXT_PUBLIC_DEMO === "1" ? ", from your browser" : ""}.`
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://pumpfun.trenchy.tools"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? suiteItem(chain.suiteId)?.url ?? "https://trenchy.tools"),
   openGraph: { type: "website", siteName: "TrenchyTools", title: `${chain.launchpad} launcher · TrenchyTools`, description: DESCRIPTION, images: [{ url: "/og.png", width: 1280, height: 640, alt: `${chain.launchpad} launcher on the TrenchyTools API` }] },
   twitter: { card: "summary_large_image", site: "@trenchytools", title: `${chain.launchpad} launcher · TrenchyTools`, description: DESCRIPTION, images: ["/og.png"] },
   title: { default: `${chain.appName} · TrenchyTools`, template: `%s · ${chain.appName}` },

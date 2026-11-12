@@ -471,6 +471,8 @@ route("POST", /^\/api\/vanity\/start$/, async (req) => {
 /** One request → the route's Response (404 for an unknown path, the API's error shape for every failure). */
 export async function handle(req: Request): Promise<Response> {
   const path = new URL(req.url).pathname
+  // a first visit: the visitor's key is still being made; every route waits for it (instant once it exists)
+  await ensureApiKey(KEY_OPTS).catch(() => null)
   for (const [method, pattern, h, failStatus] of routes) {
     if (method !== req.method) continue
     const m = pattern.exec(path)

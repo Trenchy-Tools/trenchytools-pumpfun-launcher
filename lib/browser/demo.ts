@@ -24,7 +24,8 @@ export const DEMO = process.env.NEXT_PUBLIC_DEMO === "1"
 /** Where visitors clone the app to run it on their own machine. */
 export const REPO_URL = "https://github.com/Trenchy-Tools/trenchytools-pumpfun-launcher"
 /** The API the demo talks to, straight from the browser (the CSP in next.config.ts allows exactly this host). */
-export const DEMO_API_URL = "https://api.trenchy.tools"
+/** The API this demo calls: api.trenchy.tools, or NEXT_PUBLIC_TRENCHY_API_URL in development (a local apps/api with endpoints not deployed yet). */
+export const DEMO_API_URL = (process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_TRENCHY_API_URL) || "https://api.trenchy.tools"
 /** The label of the per-visitor key: GET /api/create-api-key?label=demo-pumpfun */
 export const DEMO_KEY_LABEL = "demo-pumpfun"
 /** localStorage namespace: every key this app writes starts with it. */

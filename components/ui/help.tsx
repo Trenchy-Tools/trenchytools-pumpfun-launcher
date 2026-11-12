@@ -42,7 +42,7 @@ export function Help({ children, className, title, alert }: { children: React.Re
         key={wiggle}
         type="button"
         aria-label={title ? `What is “${title}”?` : "What is this?"}
-        className={cn("hover:text-foreground hover:border-foreground/60 inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full border align-middle font-sans text-[10px] leading-none font-semibold normal-case tracking-normal transition-colors", alert ? "border-ok bg-ok text-background hover:text-background" : "text-muted-foreground", wiggle > 0 && "tt-wiggle", className)}
+        className={cn("hover:text-foreground hover:border-foreground/60 inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full border align-middle font-sans text-[10px] leading-none font-semibold normal-case tracking-normal transition-colors", alert ? "border-brand bg-brand text-background hover:text-background" : "text-muted-foreground", wiggle > 0 && "tt-wiggle", className)}
         onMouseEnter={show}
         onMouseLeave={hide}
         onFocus={show}

@@ -26,7 +26,7 @@ function Row({ item, here }: { item: SuiteItem; here: boolean }) {
         <span className="text-muted-foreground truncate text-xs">{item.sub}</span>
       </span>
       <span className="ml-auto shrink-0 pl-3">
-        {here ? <span className="bg-ok/15 text-ok rounded px-1.5 py-0.5 text-[11px] font-semibold">you are here</span>
+        {here ? <span className="bg-brand/15 text-brand rounded px-1.5 py-0.5 text-[11px] font-semibold">you are here</span>
           : item.status === "soon" ? <span className="text-muted-foreground rounded border px-1.5 py-0.5 text-[11px]">soon</span>
             : <ExternalLink className="text-muted-foreground size-3.5" />}
       </span>
