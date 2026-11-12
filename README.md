@@ -3,9 +3,11 @@
 
 <p align="center"><a href="https://pumpfun.trenchy.tools"><b>Live demo</b></a> · <a href="https://trenchy.tools/docs">Docs</a> · <a href="https://api.trenchy.tools/api/create-api-key">Get an API key</a> · <a href="https://api.trenchy.tools/AGENTS.md">AGENTS.md</a> · <a href="https://api.trenchy.tools/openapi.json">OpenAPI</a> · <a href="https://trenchy.tools/status">Status</a> · <a href="https://t.me/trenchytools">Telegram</a> · <a href="https://x.com/trenchytools">X</a></p>
 
-# pump.fun starter
+# Solana launcher
 
-The official starter for pump.fun launches on the [TrenchyTools API](https://api.trenchy.tools).
+**Launchpads**, picked on the Launch page: **pump.fun** (Jito same-block bundles, vanity …pump mints, Mayhem, custom pairs, creator fees), **StonkFun** and **letsbonk** (Raydium LaunchLab curves; bundle buys go right after the create). Trading works on any pump.fun, PumpSwap, LaunchLab or Meteora coin.
+
+The official Solana launch starter (pump.fun, StonkFun, letsbonk) on the [TrenchyTools API](https://api.trenchy.tools).
 One Next.js app: wallets, Jito-bundled launches with up to 16 buyers, holder auto-buys, trading with timed sells and creator-fee claims, a dry run that shows every API call.
 The API builds the unsigned transactions; this app signs them with the key files in its `wallets/` folder and sends them.
 

@@ -5,6 +5,8 @@
  * themselves, so another chain (the pons starter on Robinhood Chain, any EVM chain) is mostly a new copy of this file.
  * See PORTING.md for the rest (the API client, the launch executor, the signer).
  */
+import type { Launchpad } from "./launchpad"
+
 export type ChainConfig = {
   /** the chain, as people say it ("Solana", "Robinhood Chain") */
   name: string
@@ -97,6 +99,8 @@ export type ChainConfig = {
     /** seconds after the create before any other buy (a launchpad that taxes its first seconds, e.g. Clanker's 20 s anti-snipe) */
     launchQuietS?: number
   }
+  /** the launchpads a launch can go to (lib/launchpad.ts); the first is the default */
+  launchpads: Launchpad[]
   features: {
     /** Solana: empty token accounts hold rent that "Close empty token accounts" recovers */
     tokenAccounts: boolean
@@ -119,10 +123,10 @@ export const chain: ChainConfig = {
   name: "Solana",
   symbol: "SOL",
   launchpad: "pump.fun",
-  appName: "pump.fun launcher",
+  appName: "Solana launcher",
   suiteId: "pumpfun",
   logo: "/logos/chains/solana.svg",
-  launchpadLogo: "/logos/launchpads/pumpfun.svg",
+  launchpadLogo: "/logos/chains/solana.svg",
   explorer: { name: "Solscan", logo: "/logos/terminals/solscan.png" },
   coinParam: "mint",
   coinNoun: "mint address",
@@ -164,5 +168,10 @@ export const chain: ChainConfig = {
   tipName: "Jito tip",
   bundleHelp: "With \"Same block\" the launch is one Jito bundle of 5 transactions (the create + 4 buys): up to 4 buyers get a transaction each; from 5 buyers on, a lookup table (an on-chain address list) is created first so 4 buyers fit in each transaction. Its small rent (about 0.02 SOL) is refunded a few minutes after the launch.",
   vanitySuffix: "pump",
+  launchpads: [
+    { id: "pump", name: "pump.fun", logo: "/logos/launchpads/pumpfun.svg", site: "https://pump.fun", note: "bonding curve → PumpSwap · Jito same-block bundles, vanity …pump, Mayhem, custom pairs, creator fees", body: { venue: "pump" }, coinUrl: (c) => `https://pump.fun/coin/${c}` },
+    { id: "stonkfun", name: "StonkFun", logo: "/logos/launchpads/stonkfun.svg", site: "https://www.stonkfun.xyz", note: "Raydium LaunchLab curve (Token-2022) · bundle buys go right after the create", body: { venue: "launchlab", platform: "stonkfun" }, coinUrl: (c) => `https://raydium.io/launchpad/token/?mint=${c}`, sameBlock: false, mayhem: false, pairs: false, holderRewards: false, vanitySuffix: null, creatorFees: false, createCost: 0.02, createCostNote: "pool + metadata rent + network fees" },
+    { id: "letsbonk", name: "letsbonk", logo: "/logos/launchpads/letsbonk.svg", site: "https://letsbonk.fun", note: "Raydium LaunchLab curve (1.25 % platform fee) · bundle buys go right after the create", body: { venue: "launchlab", platform: "bonk" }, coinUrl: (c) => `https://letsbonk.fun/token/${c}`, sameBlock: false, mayhem: false, pairs: false, holderRewards: false, vanitySuffix: null, creatorFees: false, createCost: 0.02, createCostNote: "pool + metadata rent + network fees" },
+  ],
   features: { tokenAccounts: true, creatorFees: true, mayhem: true, sameBlock: true, pairs: true, holderRewards: true },
 }

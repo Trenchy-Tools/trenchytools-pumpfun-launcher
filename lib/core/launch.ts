@@ -31,6 +31,7 @@ import { ApiError, isSolQuote, SOL_PAIR, SOL_QUOTE, type BuiltTx, type Expected,
 import { notIn, type Env as BaseEnv } from "./env"
 import { chain } from "../chain"
 import { launchWalletLabel, type Role, type WalletInfo } from "./wallet-record"
+import { padById, padCoinUrl, padFeatures } from "../launchpad"
 
 /** A Jito bundle holds 5 transactions: the create plus 4. With a lookup table each of the 4 carries 4 buyers. */
 export const PLAIN_BUNDLE_WALLETS = 4
@@ -79,6 +80,9 @@ export type LaunchForm = {
   creatorFeeBps: number
   /** the creator fee goes to the holders, permanently */
   holderReward: boolean
+  /** the launchpad (lib/chain.ts launchpads; pump.fun when absent) and its create-body fields ({ venue: "launchlab", platform: "stonkfun" }) */
+  launchpad?: string
+  venueOptions?: Record<string, unknown>
   /** the creator: the main wallet when empty */
   devWallet?: string
   /** the plan only: the dev wallet will be a new wallet made at launch (the Launch page then sends it as devWallet) */
@@ -226,7 +230,9 @@ function createBody(form: LaunchForm, creator: string, mint: string, pair: Pair,
     ...(form.mayhemMode ? { mayhemMode: true } : {}),
     ...(form.holderReward ? { holderReward: true } : {}),
     ...(custom && form.creatorFeeBps > 0 ? { creatorFeeBps: Math.round(form.creatorFeeBps) } : {}),
-  }
+    // the launchpad's own fields last: venue + platform for a LaunchLab pad (pump.fun's are the defaults above)
+    ...(form.venueOptions ?? {}),
+  } as TradeBody
 }
 
 /** The explicit buyers of a group, or null when the form uses the old count × solEach shape. */
@@ -245,7 +251,7 @@ function solRows(env: Env, form: LaunchForm, custom: boolean): { rows: PlanRow[]
   const useLut = form.useJito && groupSize(form.bundle) > PLAIN_BUNDLE_WALLETS
   const need = (buy: number) => (custom ? GAS_RESERVE + (buy > 0 ? CUSTOM_PAIR_FEE_RESERVE : 0) : buy * (1 + API_FEE) + GAS_RESERVE)
   const dev = form.devFresh ? null : devWallet(env, form)
-  const rows: PlanRow[] = [{ role: "dev", label: form.devFresh ? "new dev wallet (made at launch)" : dev?.label ?? (form.devWallet ? `${form.devWallet.slice(0, 6)}… (${notIn(env.wallets)})` : "Main wallet"), publicKey: form.devFresh ? null : dev?.publicKey ?? form.devWallet ?? null, buy: form.devBuySol, needSol: need(form.devBuySol) + CREATE_COST + (form.useJito ? tipSol : 0) + (useLut ? LUT_RENT_RESERVE : 0) }]
+  const rows: PlanRow[] = [{ role: "dev", label: form.devFresh ? "new dev wallet (made at launch)" : dev?.label ?? (form.devWallet ? `${form.devWallet.slice(0, 6)}… (${notIn(env.wallets)})` : "Main wallet"), publicKey: form.devFresh ? null : dev?.publicKey ?? form.devWallet ?? null, buy: form.devBuySol, needSol: need(form.devBuySol) + padFeatures(padById(form.launchpad)).createCost + (form.useJito ? tipSol : 0) + (useLut ? LUT_RENT_RESERVE : 0) }]
   const group = (role: Exclude<Role, "funding" | "trader">, g: BuyerGroup) => {
     const picked = explicit(g)
     if (picked) {
@@ -444,7 +450,7 @@ export async function fundPlan(env: Env, form: LaunchForm, note: (msg: string) =
 /** Which unit `amount` is in: the quote asset either way, under the name that reads right for the pair. */
 const denom = (custom: boolean) => (custom ? { denominatedInQuote: "true" as const } : { denominatedInSol: "true" as const })
 /** A buy on the curve. Custom-pair coins keep `pool: "pump"` (and `"auto"` after the launch): the API reads the pair from the coin. */
-const buyBody = (publicKey: string, mint: string, amount: number, slippage: number, priorityFee: number, custom: boolean): TradeBody => ({ publicKey, action: "buy", mint, amount, ...denom(custom), slippage, priorityFee, pool: "pump" })
+const buyBody = (publicKey: string, mint: string, amount: number, slippage: number, priorityFee: number, custom: boolean): TradeBody => ({ publicKey, action: "buy", mint, amount, ...denom(custom), slippage, priorityFee, pool: "auto" })
 
 /**
  * Check the form and record a new launch (status running). The caller then runs it: `void runLaunch(env, rec, form, emit)`
@@ -455,7 +461,9 @@ export function prepareLaunch(env: Env, form: LaunchForm): LaunchRecord {
   if (!dev) throw new Error(form.devWallet ? `Main wallet ${form.devWallet.slice(0, 8)}… is ${notIn(env.wallets, true)}` : "No main wallet yet: create one at the top of the Launch or Wallets page")
   if (!form.name || !form.symbol) throw new Error("Name and symbol are required")
   if (!form.metadataUri) throw new Error("Upload the image first (the metadata URI is missing)")
-  if (form.useJito && groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} bundle buyers (4 transactions of ${BUYERS_PER_TX} with a lookup table); add the rest as snipers or holders`)
+  const pad = padById(form.launchpad)
+  if (pad.disabled) throw new Error(`${pad.name} cannot launch right now: ${pad.disabled}`)
+  if (form.useJito && padFeatures(pad).sameBlock && groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} bundle buyers (4 transactions of ${BUYERS_PER_TX} with a lookup table); add the rest as snipers or holders`)
   env.wallets.assertBackedUp(dev.publicKey)
   const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
   const rec: LaunchRecord = { id, name: form.name, symbol: form.symbol, mint: null, status: "running", createdAt: new Date().toISOString(), wallets: { dev: dev.publicKey, bundle: [], sniper: [], holder: [] }, signatures: { snipers: [], holders: [] } }
@@ -469,6 +477,11 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
   const { tipSol, prioritySol } = feesOf(env, form)
   const saveLaunch = (r: LaunchRecord) => env.launches.save(r)
   const keypairOf = (pk: string) => env.wallets.keypairOf(pk)
+  const pad = padById(form.launchpad)
+  const pf = padFeatures(pad)
+  const padLink = (m: string) => padCoinUrl(pad, m)
+  // only pump.fun coins can be bought inside the bundle that creates them: elsewhere the bundle buys go right after
+  if (!pf.sameBlock && form.useJito) form = { ...form, useJito: false }
   try {
     // 0. plan: the pair, the options and (custom pair) every wallet's quote-asset balance. "New wallet" rows are created first.
     form = materialize(env, form)
@@ -584,12 +597,13 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     rec.signatures.create = createSig!
     rec.status = "confirmed"
     saveLaunch(rec)
-    emit("live", `Live on pump.fun: https://pump.fun/coin/${mint}${plan.mayhem ? " (Mayhem: pump.fun's agent trades it for 24 h)" : ""}`, { mint, signature: createSig!, link: `https://pump.fun/coin/${mint}` })
+    emit("live", `Live on ${pad.name}: ${padLink(mint)}${plan.mayhem ? " (Mayhem: pump.fun's agent trades it for 24 h)" : ""}`, { mint, signature: createSig!, link: padLink(mint) })
 
     // after the launch: auto-sell watches the coin while the snipers and holders buy; auto-claim runs on its own
     const stop = { sold: false }
     const selling = form.autoSell && autoSellArmed(form.autoSell) ? autoSell(env, rec, form.autoSell, mint, emit, stop, prioritySol) : null
-    if (form.claim) void autoClaim(env, rec, mint, form.claim, emit)
+    if (form.claim && pf.creatorFees) void autoClaim(env, rec, mint, form.claim, emit)
+    else if (form.claim) emit("claim", `Auto-claim skipped: ${pad.name} creator fees are not claimable through the API yet`)
     const volumeRun = form.volume && form.volume.wallets.length ? (custom ? (emit("volume", "Volume maker skipped: it runs on SOL coins only"), null) : volumeMaker(env, rec, form.volume, mint, emit, stop, prioritySol)) : null
 
     // 6. snipers: right now, staggered
@@ -615,7 +629,7 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     }
     if (selling) await selling
     if (volumeRun) await volumeRun
-    emit("done", "Launch complete", { mint, link: `https://pump.fun/coin/${mint}` })
+    emit("done", "Launch complete", { mint, link: padLink(mint) })
   } catch (e) {
     rec.status = "error"
     rec.error = e instanceof ApiError ? `${e.message}${e.code ? ` · ${e.code}` : ""}${e.hint ? ` · ${e.hint}` : ""}` : e instanceof Error ? e.message : String(e)
@@ -929,7 +943,7 @@ export async function simulateLaunch(env: Env, form: LaunchForm): Promise<Simula
   if (plan.custom) checks.push({ name: "pair", ok: plan.shortfalls.length === 0, detail: plan.shortfalls.length ? `short of ${plan.quote.symbol}: ${planProblems({ ...plan, refusal: null }).join("; ")}` : `every wallet holds its ${plan.quote.symbol} (${plan.totalQuote} ${plan.quote.symbol} across the plan)` })
   if (plan.refusal) checks.push({ name: "options", ok: false, detail: planProblems({ ...plan, shortfalls: [] })[0] })
   checks.push({ name: "metadata", ok: !!form.metadataUri, detail: form.metadataUri ? `metadata ${form.metadataUri}` : "no metadata URI yet: upload the image first" })
-  if (form.useJito && groupSize(form.bundle) > MAX_BUNDLE_WALLETS) checks.push({ name: "bundle", ok: false, detail: `at most ${MAX_BUNDLE_WALLETS} bundle buyers in one Jito bundle` })
+  if (form.useJito && padFeatures(padById(form.launchpad)).sameBlock && groupSize(form.bundle) > MAX_BUNDLE_WALLETS) checks.push({ name: "bundle", ok: false, detail: `at most ${MAX_BUNDLE_WALLETS} bundle buyers in one Jito bundle` })
   // refused options, or a dev wallet short of the quote asset: the build would fail with the same message, so stop here
   if (plan.refusal || plan.shortfalls.some((s) => s.role === "dev")) return { ok: false, checks, plan, simulation: null, expected: null, quote: plan.quote }
 

@@ -43,6 +43,8 @@ export function readForm(b: Record<string, unknown>, defaultSlippage: number): L
     mayhemMode: b.mayhemMode === true,
     creatorFeeBps: Math.max(0, Math.min(10_000, Math.round(num(b.creatorFeeBps, 0)))),
     holderReward: b.holderReward === true,
+    launchpad: s(b.launchpad) || undefined,
+    venueOptions: optionsOf(b.venueOptions),
     devWallet: s(b.devWallet) || undefined,
     devFresh: b.devFresh === true,
     devBuySol: Math.max(0, num(b.devBuySol, 0)),
@@ -59,6 +61,22 @@ export function readForm(b: Record<string, unknown>, defaultSlippage: number): L
     claim: b.claim && typeof b.claim === "object" ? { when: o(b.claim).when === "after" ? "after" : "sold", afterMin: Math.max(1, Math.min(24 * 60, num(o(b.claim).afterMin, 30))) } : undefined,
     volume: b.volume && typeof b.volume === "object" ? volumeOf(o(b.volume)) : undefined,
   }
+}
+
+/** The launchpad's create-body fields: plain values, one object level deep (tax: { buyTaxBps }), nothing else. */
+function optionsOf(v: unknown): Record<string, unknown> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined
+  const plain = (x: unknown) => typeof x === "string" ? x.slice(0, 80) : typeof x === "number" && Number.isFinite(x) ? x : typeof x === "boolean" ? x : undefined
+  const out: Record<string, unknown> = {}
+  for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 20)) {
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(k)) continue
+    if (x && typeof x === "object" && !Array.isArray(x)) {
+      const inner: Record<string, unknown> = {}
+      for (const [k2, y] of Object.entries(x as Record<string, unknown>).slice(0, 20)) { const p = plain(y); if (p !== undefined && /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(k2)) inner[k2] = p }
+      out[k] = inner
+    } else { const p = plain(x); if (p !== undefined) out[k] = p }
+  }
+  return out
 }
 
 /** The volume maker with bounds: 1–20 wallets, a budget, a pace, 1 min to 2 h. */
