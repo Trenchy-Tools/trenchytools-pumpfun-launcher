@@ -1,15 +1,15 @@
 /**
  * The vanity mint pool, shared by local mode (lib/vanity.ts: `vanity-pool.json` in the wallet folder) and demo mode
- * (lib/browser/engine.ts: localStorage). Only the storage differs, so the logic is one factory: `createVanity`.
+ * (lib/browser/engine.ts: localStorage). Only the storage and the grinder differ, so the logic is one factory: `createVanity`.
  *
- * Grinding happens on the API: POST /api/sol/vanity starts a job, GET /api/sol/vanity/:jobId reports progress and
- * hands the keypair out exactly once when done. Every key the API returns is written to the pool the moment it
- * arrives. Mint keypairs hold no funds and are not wallets: they live in the pool, not among the wallets.
- * No node imports.
+ * Grinding happens on YOUR machine (the API has no vanity endpoint: a mint key ground on a server is a key someone else
+ * saw). Local mode grinds in Node worker threads (lib/vanity.ts), demo mode in Web Workers (lib/browser/vanity-grind.ts).
+ * Every key found is checked against its public key and written to the pool the moment it arrives. Mint keypairs hold
+ * no funds and are not wallets: they live in the pool, not among the wallets. No node imports.
  */
 import { Keypair } from "@solana/web3.js"
 import bs58 from "bs58"
-import { ApiError, type Trenchy, type VanityJobStatus } from "../trenchy"
+import { ApiError } from "../trenchy"
 
 export type PoolEntry = {
   publicKey: string
@@ -21,11 +21,11 @@ export type PoolEntry = {
   createdAt: string
   usedAt?: string
   usedFor?: string // launch id
-  source: "api-pool" | "api-job" | "random"
+  source: "api-pool" | "api-job" | "random" | "local"
 }
 export type PoolView = Omit<PoolEntry, "secretKey">
 
-/** The job running (or last run) on the API, as the Vanity page shows it. */
+/** The grind running (or last run) on this machine, as the Vanity page shows it. */
 export type JobView = {
   jobId: string | null
   status: "idle" | "running" | "done" | "failed"
@@ -41,22 +41,59 @@ export type JobView = {
   found: string | null
   error: string | null
   poolReady: Record<string, number>
+  /** worker threads grinding */
+  threads?: number
 }
 
 export const idleJob = (): JobView => ({ jobId: null, status: "idle", suffix: "", prefix: "", caseSensitive: true, attempts: 0, expectedAttempts: 0, elapsedMs: 0, rate: 0, pooled: false, found: null, error: null, poolReady: {} })
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+// ── grinding ────────────────────────────────────────────────────────────────
+
+export type GrindSpec = { suffix: string; prefix: string; caseSensitive: boolean }
+/** Finds a keypair whose base58 address matches the spec. `onProgress` gets the attempts so far; `stop()` ends it early. */
+export type Grinder = (spec: GrindSpec, onProgress: (attempts: number) => void) => { threads: number; done: Promise<{ secretKey: Uint8Array }>; stop: () => void }
+
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+/** Longest suffix + prefix this grinds: 5 characters is ~650 M tries, already many minutes on a laptop. */
+export const MAX_VANITY_CHARS = 5
+
+/** How many keys it takes on average: 58 per character, 29 for a letter when case does not matter. */
+export function expectedAttempts(spec: GrindSpec): number {
+  let n = 1
+  for (const ch of spec.prefix + spec.suffix) n *= !spec.caseSensitive && ch.toLowerCase() !== ch.toUpperCase() && ALPHABET.includes(ch.toLowerCase()) && ALPHABET.includes(ch.toUpperCase()) ? 29 : 58
+  return n
+}
+
+export function validateSpec(spec: GrindSpec): void {
+  if (!spec.suffix && !spec.prefix) throw new ApiError("Give a suffix or a prefix", 400, "bad_request")
+  for (const ch of spec.prefix + spec.suffix) if (!ALPHABET.includes(ch) && !(!spec.caseSensitive && (ALPHABET.includes(ch.toLowerCase()) || ALPHABET.includes(ch.toUpperCase())))) {
+    throw new ApiError(`"${ch}" never appears in a Solana address (base58 has no 0, O, I or l)`, 400, "bad_request")
+  }
+  if (spec.prefix.length + spec.suffix.length > MAX_VANITY_CHARS) throw new ApiError(`At most ${MAX_VANITY_CHARS} characters (suffix + prefix): each one more is 58 times the work`, 400, "vanity_too_long")
+}
+
+/** Whether a base58 address matches the spec (the grinders use the same test). */
+export function matchesSpec(address: string, spec: GrindSpec): boolean {
+  const a = spec.caseSensitive ? address : address.toLowerCase()
+  const s = spec.caseSensitive ? spec.suffix : spec.suffix.toLowerCase()
+  const p = spec.caseSensitive ? spec.prefix : spec.prefix.toLowerCase()
+  return a.endsWith(s) && a.startsWith(p)
+}
 
 /**
- * The pool + job runner on a storage. `state.job` is the job view (module state on the server, kept across dev reloads;
- * a plain object in the browser). `where` names the pool for log lines.
+ * The pool + grind runner on a storage. `state.job` is the job view (module state on the server, kept across dev
+ * reloads; a plain object in the browser). `where` names the pool for log lines.
  */
-export function createVanity(o: { readPool: () => PoolEntry[]; writePool: (pool: PoolEntry[]) => void; api: () => Trenchy; state: { job: JobView }; where: string }) {
+export function createVanity(o: { readPool: () => PoolEntry[]; writePool: (pool: PoolEntry[]) => void; grind: Grinder; state: { job: JobView }; where: string }) {
   const { readPool, writePool, state } = o
   const view = ({ secretKey: _s, ...rest }: PoolEntry): PoolView => { void _s; return rest }
 
   const pool = (): PoolView[] => readPool().map(view).reverse()
-  const jobStatus = (): JobView => state.job
+  const jobStatus = (): JobView => {
+    const j = state.job
+    if (j.status === "running" && startedAt) j.elapsedMs = Date.now() - startedAt
+    return j
+  }
 
   /** Save a keypair to the pool (before anything else happens with it). The secret must reproduce the public key. */
   function store(kp: Keypair, meta: Pick<PoolEntry, "suffix" | "prefix" | "caseSensitive" | "source">, status: PoolEntry["status"] = "available", usedFor?: string): PoolEntry {
@@ -87,73 +124,45 @@ export function createVanity(o: { readPool: () => PoolEntry[]; writePool: (pool:
     return kp
   }
 
-  const apply = (job: VanityJobStatus) => {
-    const j = state.job
-    j.jobId = job.jobId
-    j.attempts = job.attempts
-    j.expectedAttempts = job.expectedAttempts
-    j.elapsedMs = job.elapsedMs
-    j.rate = job.elapsedMs > 0 ? Math.round(job.attempts / (job.elapsedMs / 1000)) : 0
-    j.pooled = job.pooled
-  }
+  let startedAt = 0
+  let running: ReturnType<Grinder> | null = null
 
-  /** A finished job: verify the key and save it. */
-  function finish(job: VanityJobStatus): void {
-    const j = state.job
-    if (job.status === "failed") { j.status = "failed"; j.error = job.reason ?? "the API job failed"; return }
-    if (!job.publicKey || !job.secretKey) { j.status = "failed"; j.error = job.note ?? "the job finished but its key was already collected"; return }
-    const kp = Keypair.fromSecretKey(bs58.decode(job.secretKey))
-    if (kp.publicKey.toBase58() !== job.publicKey) { j.status = "failed"; j.error = "the keypair from the API does not match its public key"; return }
-    store(kp, { suffix: job.suffix ?? "", prefix: job.prefix ?? "", caseSensitive: job.caseSensitive, source: job.pooled ? "api-pool" : "api-job" })
-    j.status = "done"
-    j.found = job.publicKey
-    console.log(`[vanity] ${job.publicKey} saved → ${o.where} (${job.pooled ? "API warm pool" : `${job.attempts.toLocaleString()} attempts`})`)
-  }
-
-  /**
-   * Start one job (POST /api/sol/vanity) and follow it in the background (GET /api/sol/vanity/:jobId every 2.5 s).
-   * Returns once the job is accepted, so a refusal (vanity_too_long, vanity_busy, no key) comes back at once.
-   */
+  /** Start grinding on this machine; returns at once (the page follows GET /api/vanity/status). */
   async function startJob(p: { suffix?: string; prefix?: string; caseSensitive?: boolean }): Promise<JobView> {
-    if (state.job.status === "running") throw new ApiError("A vanity job is already running; wait for it to finish", 409, "vanity_busy")
-    const api = o.api()
-    const suffix = (p.suffix ?? "").trim()
-    const prefix = (p.prefix ?? "").trim()
-    if (!suffix && !prefix) throw new Error("Give a suffix or a prefix")
-    state.job = { ...state.job, jobId: null, status: "running", suffix, prefix, caseSensitive: p.caseSensitive !== false, attempts: 0, expectedAttempts: 0, elapsedMs: 0, rate: 0, pooled: false, found: null, error: null }
-    try {
-      const start = await api.vanityStart({ suffix: suffix || undefined, prefix: prefix || undefined, caseSensitive: p.caseSensitive !== false })
-      state.job.jobId = start.jobId
-      state.job.expectedAttempts = start.expectedAttempts
-      state.job.poolReady = start.limits?.pool?.ready ?? state.job.poolReady
-      // One read straight away: a pooled key is already done and is handed out here.
-      const first = await api.vanityJob(start.jobId)
-      apply(first)
-      if (first.status !== "running") finish(first)
-      else void follow(start.jobId)
-    } catch (e) {
-      // the API refused the job: the view says so, and the caller gets the API's error verbatim
-      state.job.status = "failed"
-      state.job.error = e instanceof Error ? e.message : String(e)
-      throw e
-    }
+    if (state.job.status === "running") throw new ApiError("A vanity grind is already running; wait for it to finish", 409, "vanity_busy")
+    const spec: GrindSpec = { suffix: (p.suffix ?? "").trim(), prefix: (p.prefix ?? "").trim(), caseSensitive: p.caseSensitive !== false }
+    validateSpec(spec)
+    startedAt = Date.now()
+    state.job = { ...idleJob(), jobId: `local-${startedAt.toString(36)}`, status: "running", ...spec, expectedAttempts: expectedAttempts(spec) }
+    const j = state.job
+    const job = o.grind(spec, (attempts) => {
+      j.attempts = attempts
+      j.elapsedMs = Date.now() - startedAt
+      j.rate = j.elapsedMs > 0 ? Math.round(attempts / (j.elapsedMs / 1000)) : 0
+    })
+    running = job
+    j.threads = job.threads
+    job.done.then((found) => {
+      const kp = Keypair.fromSecretKey(found.secretKey)
+      const address = kp.publicKey.toBase58()
+      if (!matchesSpec(address, spec)) { j.status = "failed"; j.error = "the key found does not match the pattern"; return }
+      store(kp, { ...spec, source: "local" })
+      j.status = "done"
+      j.found = address
+      j.elapsedMs = Date.now() - startedAt
+      console.log(`[vanity] ${address} saved → ${o.where} (${j.attempts.toLocaleString()} attempts in ${(j.elapsedMs / 1000).toFixed(0)} s)`)
+    }).catch((e: unknown) => {
+      j.status = "failed"
+      j.error = e instanceof Error ? e.message : String(e)
+    }).finally(() => { running = null })
+    return j
+  }
+
+  /** Stop the running grind (nothing is saved). */
+  function stopJob(): JobView {
+    if (running) { running.stop(); running = null; state.job.status = "failed"; state.job.error = "stopped" }
     return state.job
   }
 
-  async function follow(jobId: string): Promise<void> {
-    const api = o.api()
-    for (;;) {
-      await sleep(2500)
-      try {
-        const job = await api.vanityJob(jobId)
-        apply(job)
-        if (job.status !== "running") { finish(job); return }
-      } catch (e) {
-        // A network blip is retried; a definitive refusal ends the job.
-        if (e instanceof ApiError && e.status !== 0 && e.status !== 429) { state.job.status = "failed"; state.job.error = e.message; return }
-      }
-    }
-  }
-
-  return { pool, jobStatus, randomForLaunch, takeForLaunch, startJob }
+  return { pool, jobStatus, randomForLaunch, takeForLaunch, startJob, stopJob }
 }

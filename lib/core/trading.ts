@@ -7,7 +7,7 @@
  */
 import type { Expected, Quote, TokenInfo } from "../trenchy"
 import { chain } from "../chain"
-import type { Env } from "./launch"
+import { claimTarget, type Env } from "./launch"
 import type { WalletInfo } from "./wallet-record"
 
 const PRIORITY_FEE_SOL = 0.0005
@@ -189,19 +189,23 @@ export function creatorOf(env: Env, mint: string): string | null {
 
 /** GET /api/sol/creator-fees for the coin's creator. */
 export async function creatorFees(env: Env, mint: string) {
-  const creator = creatorOf(env, mint)
+  const t = claimTarget(env, mint)
+  const creator = t.creator ?? creatorOf(env, mint)
   if (!creator) throw new Error("No creator wallet known for this coin")
-  const fees = await env.api.creatorFees(creator)
+  if (t.none) return { creator, sol: 0, lamports: "0", none: t.none }
+  const fees = await env.api.creatorFees(creator, mint)
   return { creator, sol: fees.sol, lamports: fees.lamports }
 }
 
 /** Claim them: trade-local { action: "collectCreatorFee" } signed by the creator. */
 export async function collectCreatorFees(env: Env, mint: string): Promise<{ creator: string; signature: string; confirmed: boolean }> {
-  const creator = creatorOf(env, mint)
+  const t = claimTarget(env, mint)
+  if (t.none) throw new Error(t.none)
+  const creator = t.creator ?? creatorOf(env, mint)
   if (!creator) throw new Error("No creator wallet known for this coin")
   const api = env.api
   const kp = env.wallets.keypairOf(creator)
-  const built = await api.tradeLocal({ publicKey: creator, action: "collectCreatorFee", priorityFee: 0.0001 })
+  const built = await api.tradeLocal({ publicKey: creator, action: "collectCreatorFee", mint, priorityFee: 0.0001 })
   built.tx.sign([kp])
   const { signature } = await api.send(built.tx)
   return { creator, signature, confirmed: await api.waitConfirmed(signature, 45_000) }

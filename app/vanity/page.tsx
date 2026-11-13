@@ -10,7 +10,7 @@ import { Field, Input } from "@/components/ui/input"
 import { Mono, Table, TBody, TD, TH, THead, TR } from "@/components/ui/table"
 import { Toggle } from "@/components/ui/toggle"
 
-type Job = { jobId: string | null; status: "idle" | "running" | "done" | "failed"; suffix: string; prefix: string; caseSensitive: boolean; attempts: number; expectedAttempts: number; elapsedMs: number; rate: number; pooled: boolean; found: string | null; error: string | null; poolReady: Record<string, number> }
+type Job = { jobId: string | null; status: "idle" | "running" | "done" | "failed"; suffix: string; prefix: string; caseSensitive: boolean; attempts: number; expectedAttempts: number; elapsedMs: number; rate: number; pooled: boolean; found: string | null; error: string | null; poolReady: Record<string, number>; threads?: number }
 type Pool = { file: string; available: number; used: number; entries: Array<{ publicKey: string; suffix: string; prefix: string; status: "available" | "used"; createdAt: string; usedFor?: string; source: string }> }
 
 export default function VanityPage() {
@@ -43,7 +43,7 @@ export default function VanityPage() {
     <div className="grid gap-6 lg:grid-cols-[400px_1fr]">
       <div className="flex flex-col gap-4">
         <Card>
-          <CardHeader><CardTitle>Grind a mint address</CardTitle><CardDescription>Ground on the API&apos;s workers (POST /api/sol/vanity). Suffix + prefix together at most 4 characters; common suffixes come from a warm pool at once.</CardDescription></CardHeader>
+          <CardHeader><CardTitle>Grind a mint address</CardTitle><CardDescription>Ground on this machine, never on a server: the key is yours alone. Suffix + prefix together at most 5 characters. A 4-letter suffix like <code>pump</code> takes a few minutes; every letter more is 58 times longer.</CardDescription></CardHeader>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Suffix"><Input value={suffix} onChange={(e) => setSuffix(e.target.value)} placeholder="pump" /></Field>
             <Field label="Prefix"><Input value={prefix} onChange={(e) => setPrefix(e.target.value)} /></Field>
@@ -55,7 +55,7 @@ export default function VanityPage() {
             <div className="flex flex-col gap-2 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 <Pill tone={job.status === "done" ? "ok" : job.status === "failed" ? "bad" : "warn"}>{job.status}</Pill>
-                <span className="text-muted-foreground">{job.prefix}…{job.suffix}{job.pooled ? " · from the warm pool" : ""}{job.jobId ? ` · job ${job.jobId.slice(0, 8)}` : ""}</span>
+                <span className="text-muted-foreground">{job.prefix}…{job.suffix}{job.threads ? ` · ${job.threads} thread${job.threads === 1 ? "" : "s"}` : ""}</span>
               </div>
               <div className="bg-muted h-1.5 overflow-hidden rounded-full"><div className="bg-foreground h-full transition-all" style={{ width: `${Math.round(progress * 100)}%` }} /></div>
               <div className="text-muted-foreground grid grid-cols-3 gap-2 text-xs">

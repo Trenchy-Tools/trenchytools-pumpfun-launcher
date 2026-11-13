@@ -176,6 +176,8 @@ export type LaunchRecord = {
   mayhem?: boolean
   holderReward?: boolean
   creatorFeeBps?: number
+  /** the launchpad it was made on (lib/chain.ts launchpads id) */
+  pad?: string
   error?: string
 }
 
@@ -466,7 +468,7 @@ export function prepareLaunch(env: Env, form: LaunchForm): LaunchRecord {
   if (form.useJito && padFeatures(pad).sameBlock && groupSize(form.bundle) > MAX_BUNDLE_WALLETS) throw new Error(`At most ${MAX_BUNDLE_WALLETS} bundle buyers (4 transactions of ${BUYERS_PER_TX} with a lookup table); add the rest as snipers or holders`)
   env.wallets.assertBackedUp(dev.publicKey)
   const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
-  const rec: LaunchRecord = { id, name: form.name, symbol: form.symbol, mint: null, status: "running", createdAt: new Date().toISOString(), wallets: { dev: dev.publicKey, bundle: [], sniper: [], holder: [] }, signatures: { snipers: [], holders: [] } }
+  const rec: LaunchRecord = { id, name: form.name, symbol: form.symbol, mint: null, status: "running", createdAt: new Date().toISOString(), wallets: { dev: dev.publicKey, bundle: [], sniper: [], holder: [] }, signatures: { snipers: [], holders: [] }, pad: padById(form.launchpad).id }
   env.launches.save(rec)
   return rec
 }
@@ -878,9 +880,9 @@ async function autoClaim(env: Env, rec: LaunchRecord, mint: string, c: AutoClaim
   }
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const fees = await env.api.creatorFees(creator)
+      const fees = await env.api.creatorFees(creator, mint)
       if (fees.sol <= 0) { emit("claim", "No creator fees to claim"); return }
-      const built = await env.api.tradeLocal({ publicKey: creator, action: "collectCreatorFee", priorityFee: 0.0001 })
+      const built = await env.api.tradeLocal({ publicKey: creator, action: "collectCreatorFee", mint, priorityFee: 0.0001 })
       built.tx.sign([env.wallets.keypairOf(creator)])
       const { signature } = await env.api.send(built.tx)
       emit("claim", `Claimed ${fees.sol.toFixed(4)} SOL of creator fees into the main wallet (${signature.slice(0, 12)}…)`, { signature })
@@ -890,6 +892,13 @@ async function autoClaim(env: Env, rec: LaunchRecord, mint: string, c: AutoClaim
       if (attempt < 3) await sleep(60_000)
     }
   }
+}
+
+/** Where a coin's creator fees go: its creator (our launch record), and `none` when its launchpad pays nothing to claim. */
+export function claimTarget(env: Env, mint: string): { creator: string | null; none: string | null } {
+  const rec = env.launches.list().find((l) => l.mint === mint)
+  const pad = rec?.pad ? padById(rec.pad) : null
+  return { creator: rec?.wallets.dev ?? null, none: pad && !padFeatures(pad).creatorFees ? pad.feeNote ?? `${pad.name} pays no creator fees you can claim` : null }
 }
 
 /** Deactivate the table now; close it once the chain allows (~4 min, 409 cooling_down before), refunding the rent to the dev. */

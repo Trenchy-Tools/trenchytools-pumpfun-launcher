@@ -28,6 +28,7 @@ import { RouteError, errorBody } from "../core/errors"
 import { num, readForm, strings } from "../core/form"
 import { fireRule, isFinished, newTimerRule, type TimerRule } from "../core/timers"
 import { createVanity, idleJob, type PoolEntry } from "../core/vanity"
+import { browserGrind } from "./vanity-grind"
 import { APP_NAME, CHAIN, cleanLabel, isRole, newLabel, stampAt, type Role, type WalletInfo } from "../core/wallet-record"
 import { ApiError, Trenchy, type TransferMode } from "../trenchy"
 import { ensureApiKey, keyError, maskKey, readApiKey, replaceApiKey, setApiKey, type KeyOptions } from "./api-key"
@@ -104,7 +105,7 @@ const walletStore: WalletStore = {
 const vanity = createVanity({
   readPool: () => load<PoolEntry[]>(`${P}.vanityPool`, []),
   writePool: (pool) => save(`${P}.vanityPool`, pool),
-  api,
+  grind: browserGrind,
   state: { job: idleJob() },
   where: `${KEYS_HOME} (localStorage)`,
 })

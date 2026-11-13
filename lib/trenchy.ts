@@ -95,14 +95,6 @@ export type WalletBalance = { wallet: string; sol: number; token?: { mint: strin
 export type TokenAccount = { mint: string; balance: number; raw: string; account: string; program: string }
 export type Simulation = { ok: boolean; err: unknown; unitsConsumed: number | null; logs: string[] }
 
-export type VanityJobStart = { jobId: string; status: "running"; suffix?: string; prefix?: string; caseSensitive: boolean; expectedAttempts: number; limits?: { maxChars: number; timeoutS: number; pool?: { ready?: Record<string, number> } }; poll: string }
-export type VanityJobStatus = {
-  jobId: string; status: "running" | "done" | "failed"; pooled: boolean; suffix?: string; prefix?: string; caseSensitive: boolean
-  attempts: number; elapsedMs: number; expectedAttempts: number
-  /** done, first read only: the keypair, handed out once */
-  publicKey?: string; secretKey?: string
-  reason?: string; note?: string
-}
 
 export type TransferMode = "float" | "fixed" | "private"
 export type TransferVenues = { exchange: "on" | "off" | "degraded"; checkedAt: string | null; venues: Record<string, { status: "open" | "closed" | "unknown"; reason?: string; default?: boolean }>; note?: string }
@@ -455,7 +447,8 @@ export class Trenchy {
     return r.tokens
   }
   /** GET /api/sol/creator-fees?wallet=…: unclaimed pump.fun creator fees of a dev wallet. */
-  creatorFees(wallet: string) { return this.get<{ wallet: string; lamports: string; sol: number }>(`/api/sol/creator-fees?wallet=${wallet}`) }
+  /** GET /api/sol/creator-fees: every creator fee the wallet can collect (pump.fun in every quote, the coin's unswept curve, LaunchLab, StonkFun wSOL); `sol` = what a claim pays in SOL. */
+  creatorFees(wallet: string, mint?: string) { return this.get<{ wallet: string; lamports: string; sol: number; forwarded?: { sol: number } }>(`/api/sol/creator-fees?wallet=${wallet}${mint ? `&mint=${mint}` : ""}`) }
 
   /** GET /api/sol/pnl: each wallet's exact SOL change in every transaction that touched the coin (≤ 25 wallets per call). */
   /** GET /api/sol/quote: what a buy or sell would get right now (curve / pool math, pump.fun's fees included; our fee not). */
@@ -504,10 +497,6 @@ export class Trenchy {
 
   // ── vanity mints (ground on the API's workers) ──────────────────────────
 
-  /** POST /api/sol/vanity: start a job (suffix + prefix ≤ 4 characters). Common suffixes come from a warm pool and are done at once. */
-  vanityStart(p: { suffix?: string; prefix?: string; caseSensitive?: boolean }) { return this.post<VanityJobStart>("/api/sol/vanity", p) }
-  /** GET /api/sol/vanity/:jobId: running | done (keypair, handed out exactly once: save it at once) | failed. */
-  vanityJob(jobId: string) { return this.get<VanityJobStatus>(`/api/sol/vanity/${encodeURIComponent(jobId)}`) }
 
   // ── transfers (wallet → wallet, direct or through an exchange hop) ──────
 
