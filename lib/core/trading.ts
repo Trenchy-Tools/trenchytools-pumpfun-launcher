@@ -9,6 +9,7 @@ import type { Expected, Quote, TokenInfo } from "../trenchy"
 import { chain } from "../chain"
 import { claimTarget, type Env } from "./launch"
 import type { WalletInfo } from "./wallet-record"
+import { controlAutomation, viewAutomations, type Automation } from "../automations"
 
 const PRIORITY_FEE_SOL = 0.0005
 
@@ -161,6 +162,14 @@ export async function collectCreatorFees(env: Env, mint: string): Promise<{ crea
   const { signature } = await api.send(built.tx)
   return { creator, signature, confirmed: await api.waitConfirmed(signature, 45_000) }
 }
+
+// ── what the coin's launches keep running (lib/automations.ts) ───────────────
+
+/** Auto-sell, the volume maker, the later buyers, auto-claim of this coin's launches: where each stands (the Trading page's panel). */
+export const automations = (env: Env, mint: string): Automation[] =>
+  viewAutomations(mint, env.launches.list().filter((l) => l.mint === mint).map((l) => ({ id: l.id, automations: l.automations })))
+/** Pause, resume or stop one of them. Null when nothing runs it any more (the page that launched was reloaded). */
+export const controlAutomations = (id: string, action: "pause" | "resume" | "stop"): Automation | null => controlAutomation(id, action)
 
 // ── live trades ─────────────────────────────────────────────────────────────
 

@@ -428,6 +428,19 @@ route("GET", /^\/api\/trading\/pnl$/, async (req) => {
   if (!mint) throw new RouteError("mint is required")
   return ok(await trading.pnl(env(), mint))
 })
+// what the coin's launches keep running in this tab, and Pause / Resume / Stop for each
+route("GET", /^\/api\/trading\/automations$/, (req) => {
+  const mint = coin(req)
+  if (!mint) throw new RouteError("mint is required")
+  return ok({ automations: trading.automations(env(), mint) })
+})
+route("POST", /^\/api\/trading\/automations$/, async (req) => {
+  const b = await body<{ id: string; action: string }>(req)
+  if (typeof b.id !== "string" || (b.action !== "pause" && b.action !== "resume" && b.action !== "stop")) throw new RouteError("id and action (pause, resume or stop) are required")
+  const a = trading.controlAutomations(b.id, b.action)
+  if (!a) throw new RouteError("Nothing runs this any more: this tab was reloaded since the launch")
+  return ok({ automation: a })
+})
 route("POST", /^\/api\/trading\/creator-fees$/, async (req) => {
   const b = await body<{ mint: string }>(req)
   if (typeof b.mint !== "string") throw new RouteError("mint is required")
