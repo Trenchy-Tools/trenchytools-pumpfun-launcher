@@ -11,9 +11,6 @@ import { claimTarget, type Env } from "./launch"
 import type { WalletInfo } from "./wallet-record"
 
 const PRIORITY_FEE_SOL = 0.0005
-/** Sell all builds and sends this many wallets per burst (the API allows 25 requests a second per key) */
-const SELL_WAVE = 20
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export type Holding = WalletInfo & { sol: number; tokens: number; raw: string }
 
@@ -80,53 +77,7 @@ export async function buy(env: Env, publicKey: string, mint: string, amount: num
   return { publicKey, signature, action: "buy", expected: built.expected, quote: built.quote, venue: built.venue, confirmed }
 }
 
-export type SellAllResult = Array<TradeResult | { publicKey: string; skipped?: string; error?: string; code?: string }>
-
-/** Sell `percent` from each wallet, one after the other (wallets holding none are skipped). */
-export async function sellAll(env: Env, publicKeys: string[], mint: string, percent: number): Promise<SellAllResult> {
-  const api = env.api
-  const rows = await api.balances(publicKeys, mint)
-  const held = new Map(rows.map((r) => [r.wallet, r.token?.raw ?? "0"]))
-  const pct = Math.max(1, Math.min(100, Math.round(percent)))
-  const out: SellAllResult = new Array(publicKeys.length)
-  const fail = (i: number, e: unknown) => { out[i] = { publicKey: publicKeys[i], error: e instanceof Error ? e.message : String(e), code: (e as { code?: string })?.code } }
-  const waves = <T,>(xs: T[], n: number) => Array.from({ length: Math.ceil(xs.length / n) }, (_, k) => xs.slice(k * n, k * n + n))
-
-  // 1. build and sign every sell first (all at once, in waves of SELL_WAVE so the API's 25-a-second cap holds)
-  type Ready = { i: number; tx: Awaited<ReturnType<typeof api.tradeLocal>> }
-  const ready: Ready[] = []
-  const todo = publicKeys.map((pk, i) => ({ pk, i })).filter(({ pk, i }) => {
-    if ((held.get(pk) ?? "0") !== "0") return true
-    out[i] = { publicKey: pk, skipped: "holds none" }
-    return false
-  })
-  for (const wave of waves(todo, SELL_WAVE)) {
-    await Promise.all(wave.map(async ({ pk, i }) => {
-      try {
-        const kp = env.wallets.keypairOf(pk) // the key must be backed up: NotBackedUpError otherwise
-        const built = await api.tradeLocal({ publicKey: pk, action: "sell", mint, amount: `${pct}%`, denominatedInQuote: "false", slippage: env.slippage, priorityFee: PRIORITY_FEE_SOL, pool: "auto" })
-        built.tx.sign([kp])
-        ready.push({ i, tx: built })
-      } catch (e) { fail(i, e) }
-    }))
-  }
-
-  // 2. send them all in the same instant (one burst per wave, the waves back to back)
-  const sent: Array<Ready & { signature: string }> = []
-  for (const wave of waves(ready, SELL_WAVE)) {
-    await Promise.all(wave.map(async (r) => {
-      try { sent.push({ ...r, signature: (await api.send(r.tx.tx)).signature }) } catch (e) { fail(r.i, e) }
-    }))
-  }
-
-  // 3. confirm them together (starts spread over a second so the status checks do not all hit at once)
-  await Promise.all(sent.map(async (r, k) => {
-    await sleep((k % 20) * 50)
-    const confirmed = await api.waitConfirmed(r.signature, 25_000).catch(() => false)
-    out[r.i] = { publicKey: publicKeys[r.i], signature: r.signature, action: "sell", expected: r.tx.expected, quote: r.tx.quote, venue: r.tx.venue, confirmed }
-  }))
-  return out
-}
+export { sellAll, type SellAllResult } from "./sell-all"
 
 export type Pnl = {
   spent: number; received: number; net: number; trades: number; truncated: boolean

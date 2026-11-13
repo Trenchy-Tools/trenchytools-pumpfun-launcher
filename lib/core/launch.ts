@@ -32,6 +32,7 @@ import { notIn, type Env as BaseEnv } from "./env"
 import { chain } from "../chain"
 import { launchWalletLabel, type Role, type WalletInfo } from "./wallet-record"
 import { padById, padCoinUrl, padFeatures } from "../launchpad"
+import { sellAll } from "./sell-all"
 
 /** A Jito bundle holds 5 transactions: the create plus 4. With a lookup table each of the 4 carries 4 buyers. */
 export const PLAIN_BUNDLE_WALLETS = 4
@@ -744,22 +745,16 @@ async function autoSell(env: Env, rec: LaunchRecord, a: AutoSell, mint: string, 
     }
   }
   const label = (pk: string) => env.wallets.get(pk)?.label ?? pk.slice(0, 8)
-  /** All at once: build and sign every sell, then send them all in the same instant (no wallet waits for another's build). */
+  /** All at once, through the shared batch sell (lib/core/sell-all.ts): one slippage that covers the batch's own price
+   *  impact, then a second round for any wallet still holding. Only sells that were sent are reported as sold. */
   const sellTogether = async (list: Array<{ pk: string; who: string }>) => {
-    const built = await Promise.all(list.map(async ({ pk, who }) => {
-      try {
-        const b = await env.api.tradeLocal({ publicKey: pk, action: "sell", mint, amount: "100%", denominatedInQuote: "false", slippage: Math.max(env.slippage, 25), priorityFee: prioritySol, pool: "auto" })
-        b.tx.sign([env.wallets.keypairOf(pk)])
-        return { who, tx: b.tx }
-      } catch (e) { emit("warning", `${who} sell failed: ${e instanceof Error ? e.message : e}`); return null }
-    }))
-    await Promise.all(built.map(async (b) => {
-      if (!b) return
-      try {
-        const { signature } = await env.api.send(b.tx)
-        emit("autosell", `${b.who} sold everything (${signature.slice(0, 12)}…)`, { signature })
-      } catch (e) { emit("warning", `${b.who} sell failed: ${e instanceof Error ? e.message : e}`) }
-    }))
+    const who = new Map(list.map((x) => [x.pk, x.who]))
+    const results = await sellAll(env, list.map((x) => x.pk), mint, 100, prioritySol)
+    for (const r of results) {
+      const name = who.get(r.publicKey) ?? r.publicKey.slice(0, 8)
+      if ("signature" in r) emit("autosell", `${name} sold everything${r.retried ? " (second try)" : ""}${r.confirmed ? "" : ", not confirmed yet"} (${r.signature.slice(0, 12)}…)`, { signature: r.signature })
+      else if ("error" in r && r.error) emit("warning", `${name} sell failed: ${r.error}`)
+    }
   }
 
   // the main wallet on its own trigger: watched from the launch on, whether the buyers have sold or not
