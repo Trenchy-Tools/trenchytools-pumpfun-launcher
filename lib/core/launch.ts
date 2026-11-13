@@ -506,7 +506,7 @@ export async function runLaunch(env: Env, rec: LaunchRecord, form: LaunchForm, e
     const snipers = pick(env, "sniper", form.snipers, form.symbol)
     const holders = pick(env, "holder", form.holders, form.symbol)
     rec.wallets = { dev: rec.wallets.dev, bundle: bundle.map((w) => w.publicKey), sniper: snipers.map((w) => w.publicKey), holder: holders.map((w) => w.publicKey), volume: form.volume?.wallets ?? [] }
-    emit("wallets", `Creator ${rec.wallets.dev.slice(0, 8)}… · ${bundle.length} bundle · ${snipers.length} sniper · ${holders.length} holder wallet(s), all backed up`)
+    emit("wallets", `Creator ${rec.wallets.dev.slice(0, 8)}… · ${bundle.length} ${form.useJito && padFeatures(pad).sameBlock ? "bundle" : "first buyer"} · ${snipers.length} sniper · ${holders.length} holder wallet(s), all backed up`)
 
     // 2. mint
     const mintKp = form.mint.mode === "vanity" ? env.mints.takeForLaunch(rec.id, form.mint.publicKey) : env.mints.randomForLaunch(rec.id)
@@ -693,7 +693,7 @@ async function outsideNetIn(env: Env, mint: string, ours: Set<string>): Promise<
   return net
 }
 
-/** The bundle "right after" the launch: one buy after the other with a random pause, skipping the rest once outsiders put in too much. */
+/** The first buyers "right after" the launch (every launchpad without a same-block bundle, and pump.fun with "Right after"): one buy after the other with a random pause, skipping the rest once outsiders put in too much. */
 async function afterBuys(env: Env, mint: string, wallets: Picked[], form: LaunchForm, emit: Emit, custom: boolean, sym: string, prioritySol: number, ours: Set<string>): Promise<string[]> {
   const sigs: string[] = []
   const lo = Math.max(0, form.bundleGap?.fromMs ?? 0), hi = Math.max(lo, form.bundleGap?.toMs ?? 0)
@@ -702,9 +702,9 @@ async function afterBuys(env: Env, mint: string, wallets: Picked[], form: Launch
     if (i > 0 && hi > 0) await sleep(lo + Math.random() * (hi - lo))
     if (max > 0) {
       const net = await outsideNetIn(env, mint, ours).catch(() => 0)
-      if (net > max) { emit("bundle", `Outside buyers already put in ${net.toFixed(3)} SOL (limit ${max}): the ${wallets.length - i} bundle buy(s) still to come are skipped`); break }
+      if (net > max) { emit("buyers", `Outside buyers already put in ${net.toFixed(3)} SOL (limit ${max}): the ${wallets.length - i} buy(s) still to come are skipped`); break }
     }
-    const sig = await oneBuy(env, mint, w, w.amount, form.slippage, emit, "bundle", custom, sym, prioritySol)
+    const sig = await oneBuy(env, mint, w, w.amount, form.slippage, emit, "buyers", custom, sym, prioritySol)
     if (sig) sigs.push(sig)
   }
   return sigs

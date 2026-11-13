@@ -74,6 +74,8 @@ export type ChainConfig = {
   tipName: string | null
   /** one line on how bundle buyers land, for the "?" of Bundle buyers (limits, lookup tables, …) */
   bundleHelp: string
+  /** the same line for launchpads whose buyers go right after the create ("First buyers") */
+  firstBuyersHelp?: string
   /** a vanity address suffix the launchpad uses ("pump"), or null */
   vanitySuffix: string | null
   /**
@@ -166,12 +168,13 @@ export const chain: ChainConfig = {
   minGas: 0.002,
   maxBundle: 16,
   tipName: "Jito tip",
+  firstBuyersHelp: "StonkFun, letsbonk and Raydium coins are created on Raydium LaunchLab, where the buys cannot ride in one Jito bundle with the create yet: each wallet buys with its own transaction as soon as the coin is live.",
   bundleHelp: "With \"Same block\" the launch is one Jito bundle of 5 transactions (the create + 4 buys): up to 4 buyers get a transaction each; from 5 buyers on, a lookup table (an on-chain address list) is created first so 4 buyers fit in each transaction. Its small rent (about 0.02 SOL) is refunded a few minutes after the launch.",
   vanitySuffix: "pump",
   launchpads: [
     { id: "pump", name: "pump.fun", logo: "/logos/launchpads/pumpfun.svg", site: "https://pump.fun", note: "bonding curve → PumpSwap · Jito same-block bundles, vanity …pump, Mayhem, custom pairs, creator fees", body: { venue: "pump" }, coinUrl: (c) => `https://pump.fun/coin/${c}` },
-    { id: "stonkfun", name: "StonkFun", logo: "/logos/launchpads/stonkfun.svg", site: "https://www.stonkfun.xyz", note: "Raydium LaunchLab curve (Token-2022) · bundle buys go right after the create · StonkFun sends your creator share as wSOL; Claim unwraps it", body: { venue: "launchlab", platform: "stonkfun" }, coinUrl: (c) => `https://raydium.io/launchpad/token/?mint=${c}`, sameBlock: false, mayhem: false, pairs: false, holderRewards: false, vanitySuffix: null, createCost: 0.02, createCostNote: "pool + metadata rent + network fees" },
-    { id: "letsbonk", name: "letsbonk", logo: "/logos/launchpads/letsbonk.svg", site: "https://letsbonk.fun", note: "Raydium LaunchLab curve (1.25 % platform fee) · bundle buys go right after the create", body: { venue: "launchlab", platform: "bonk" }, coinUrl: (c) => `https://letsbonk.fun/token/${c}`, sameBlock: false, mayhem: false, pairs: false, holderRewards: false, vanitySuffix: null, creatorFees: false, feeNote: "letsbonk pays creators nothing (its creator fee is 0 %)", createCost: 0.02, createCostNote: "pool + metadata rent + network fees" },
+    { id: "stonkfun", name: "StonkFun", logo: "/logos/launchpads/stonkfun.svg", site: "https://www.stonkfun.xyz", note: "Raydium LaunchLab curve (Token-2022) · first buyers go right after the create (no same-block bundle) · StonkFun sends your creator share as wSOL; Claim unwraps it", body: { venue: "launchlab", platform: "stonkfun" }, coinUrl: (c) => `https://raydium.io/launchpad/token/?mint=${c}`, sameBlock: false, mayhem: false, pairs: false, holderRewards: false, vanitySuffix: null, createCost: 0.02, createCostNote: "pool + metadata rent + network fees" },
+    { id: "letsbonk", name: "letsbonk", logo: "/logos/launchpads/letsbonk.svg", site: "https://letsbonk.fun", note: "Raydium LaunchLab curve (1.25 % platform fee) · first buyers go right after the create (no same-block bundle)", body: { venue: "launchlab", platform: "bonk" }, coinUrl: (c) => `https://letsbonk.fun/token/${c}`, sameBlock: false, mayhem: false, pairs: false, holderRewards: false, vanitySuffix: null, creatorFees: false, feeNote: "letsbonk pays creators nothing (its creator fee is 0 %)", createCost: 0.02, createCostNote: "pool + metadata rent + network fees" },
     { id: "raydium", name: "Raydium", logo: "/logos/launchpads/raydium.png", site: "https://raydium.io/launchpad/", note: "Raydium's own LaunchLab curve (100 SOL raise) · you earn 0.05 % of every trade, claimable, and 10 % of the LP fees after graduation", body: { venue: "launchlab", platform: "raydium" }, coinUrl: (c) => `https://raydium.io/launchpad/token/?mint=${c}`, sameBlock: false, mayhem: false, pairs: false, holderRewards: false, vanitySuffix: null, createCost: 0.02, createCostNote: "pool + metadata rent + network fees" },
   ],
   features: { tokenAccounts: true, creatorFees: true, mayhem: true, sameBlock: true, pairs: true, holderRewards: true },
